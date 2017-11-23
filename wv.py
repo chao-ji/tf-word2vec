@@ -5,6 +5,7 @@ import tensorflow as tf
 class Word2Vec(object):
   def __init__(self,
                 embedding_size=100,
+                norm_embeddings=True,
                 window=5,
                 min_word_count=5,
                 max_vocab_size=None,
@@ -17,11 +18,14 @@ class Word2Vec(object):
                 cbow=False,
                 negative_sampling=True,
                 hierarchical_softmax=False,
+                cbow_mean=True,  
                 max_batch_size=64,
                 epochs=5,
                 num_neg_samples=5,
+                log_every_steps=10000,
                 seed=1):
     self.embedding_size = embedding_size
+    self.norm_embeddings = norm_embeddings
     self.window = window
     self.min_word_count = min_word_count
     self.max_vocab_size = max_vocab_size
@@ -40,9 +44,11 @@ class Word2Vec(object):
     self.cbow = cbow
     self.negative_sampling = negative_sampling
     self.hierarchical_softmax = hierarchical_softmax
+    self.cbow_mean = cbow_mean
     self.max_batch_size = max_batch_size
     self.epochs = epochs
     self.num_neg_samples = num_neg_samples
+    self.log_every_steps=log_every_steps
     self.seed = seed
 
     self.random_state = np.random.RandomState(seed)
@@ -53,14 +59,14 @@ class Word2Vec(object):
     self.vocabulary_size = None
     self.index2word = None
     self.num_words = None
-    self._total_target_words = None
+    self._total_sents = None
 
     self.embeddings = None
     self.weights = None
     self.biases = None
 
-    self._progress = None
-    self._target_words_covered = 0
+    self._progress = 0. 
+    self._sents_covered = 0
 
   def build_vocab(self, sents):
     num_words = 0
@@ -92,7 +98,7 @@ class Word2Vec(object):
     self.vocabulary_size = len(vocab)
     self.index2word = index2word
     self.num_words = num_words
-    self._total_target_words = float(self.num_words * self.epochs)
+    self._total_sents = float(len(sents) * self.epochs)
 
   def _prune_vocab(self, raw_vocab, word_count_cutoff):     
     for word in raw_vocab.keys():
@@ -112,24 +118,33 @@ class Word2Vec(object):
     return raw_vocab
 
   def generate_batch(self, sents_iter):
+    def skip_gram(batch):
+      batch = np.vstack(batch)
+      target, context = batch[:, 0], batch[:, 1]
+      return target, context, target.shape[0]
+
+    def cbow(batch):
+      target = np.array(zip(*batch)[0])
+      tmp = zip(*batch)[1]
+      context = np.concatenate(tmp)
+      lengths = [0] + map(len, tmp)
+      cumsum = np.cumsum(lengths)
+      start_end = np.vstack([cumsum[:-1], cumsum[1:] - cumsum[:-1]]).T
+      return target, context, start_end, target.shape[0]
+
     generator = (v for sent in sents_iter for v in self._tarcon_per_sent(sent))
     
-    batch, size = [], 0
+    batch = []
     for v in generator:
-      if size < self.max_batch_size:
+      if len(batch) < self.max_batch_size:
         batch.append(v)
-        size += 1
       else:
-        yield np.vstack(batch)
+        yield skip_gram(batch) if self.skip_gram else cbow(batch) 
         batch = [v]
-        size = 1
 
-    if size > 0:
-      yield np.pad(np.vstack(batch),
-            [[0, self.max_batch_size - len(batch)], [0, 0]],
-            mode="constant",
-            constant_values=[-1])
-      batch, size = [], 0
+    if batch:
+      yield skip_gram(batch) if self.skip_gram else cbow(batch) 
+      batch = []
       
   def _tarcon_per_sent(self, sent):
     keep_word = lambda word: (word in self.vocab) and self.random_state.binomial(1, self.vocab[word]["keep_prob"])
@@ -142,24 +157,21 @@ class Word2Vec(object):
                 xrange(max(word_index - self.window + reduced_size, 0), word_index))
       after = map(lambda i: sent_trimmed[i],
                 xrange(word_index + 1, min(word_index + 1 + self.window - reduced_size, len(sent_trimmed))))
+      contexts = before + after
 
-      context = before + after
-      if self.skip_gram:
-        for con in context:
-          tc = np.array([[target, con]])        
-          yield tc
-      else:
-        tc = -np.ones((1, 2 * self.window + 1))
-        tc[0, 0] = target
-        tc[0, 1:1+len(context)] = context
-        yield tc
+      if contexts:
+        if self.skip_gram:
+          for context in contexts:
+            yield target, context
+        else:
+          yield target, contexts 
 
     for target in xrange(len(sent_trimmed)):
       for v in tarcon_per_target(target):
         yield v
 
-    self._progress = self._target_words_covered / self._total_target_words
-    self._target_words_covered += len(sent)
+    self._sents_covered += 1
+    self._progress = self._sents_covered / self._total_sents
 
   def initialize_variables(self):
     def seeded_vector(seed_string):
@@ -170,14 +182,18 @@ class Word2Vec(object):
     for i in xrange(self.vocabulary_size):
       embeddings_val[i] = seeded_vector(self.index2word[i] + str(self.seed))
 
-    self.embeddings = tf.Variable(embeddings_val)
+    self.embeddings = tf.Variable(embeddings_val, dtype=tf.float32)
     self.weights = tf.Variable(tf.truncated_normal([self.vocabulary_size, self.embedding_size],
-                                stddev=1.0/np.sqrt(self.embedding_size)))
-    self.biases = tf.Variable(tf.zeros([self.vocabulary_size]))
+                                stddev=1.0/np.sqrt(self.embedding_size)), dtype=tf.float32)
+    self.biases = tf.Variable(tf.zeros([self.vocabulary_size]), dtype=tf.float32)
 
-  def logits_skip_gram(self, labels, inputs):
-    real_batch_size = tf.reduce_sum(tf.cast(tf.greater_equal(labels, 0), tf.int32))
+    labels = tf.placeholder(dtype=tf.int64, shape=[None])
+    inputs = tf.placeholder(dtype=tf.int64, shape=[None])
+    start_end = tf.placeholder(dtype=tf.int32, shape=[None, 2])
+    real_batch_size = tf.placeholder(dtype=tf.int32, shape=[])
+    return labels, inputs, start_end, real_batch_size
 
+  def logits(self, labels=None, inputs=None, start_end=None, real_batch_size=None):
     # [V, D]
     embeddings = self.embeddings
     # [V, D]
@@ -199,9 +215,18 @@ class Word2Vec(object):
 
     # [N, K]
     sampled_mat = tf.reshape(sampled, [self.max_batch_size, self.num_neg_samples])
+    sampled_mat = sampled_mat[:real_batch_size]
 
     # [N, D]
     inputs_embeddings = tf.nn.embedding_lookup(embeddings, inputs)
+    if not self.skip_gram:
+      average_func = lambda row: tf.reduce_mean(tf.slice(inputs_embeddings,
+                                                [row[0], 0], [row[1], self.embedding_size]), 0)
+      sum_func = lambda row: tf.reduce_sum(tf.slice(inputs_embeddings,
+                                                [row[0], 0], [row[1], self.embedding_size]), 0)
+
+      func = average_func if self.cbow_mean else sum_func
+      inputs_embeddings = tf.map_fn(func, start_end, dtype=tf.float32)
 
     # [N, D]
     true_weights = tf.nn.embedding_lookup(weights, labels)
@@ -220,30 +245,8 @@ class Word2Vec(object):
 
     # [N, K] 
     sampled_logits = tf.reduce_sum(tf.multiply(tf.expand_dims(inputs_embeddings, 1), sampled_weights), 2) + sampled_biases
-    
-    true_logits, sampled_logits = true_logits[:real_batch_size], sampled_logits[:real_batch_size]
+
     return true_logits, sampled_logits
-
-  def logits_cbow(self, labels, inputs):
-    embeddings = self.embeddings
-    weights = self.weights
-    biases = self.biases
-
-    sampled_values = tf.nn.fixed_unigram_candidate_sampler(
-      true_classes=tf.expand_dims(labels, 1),
-      num_true=1,
-      num_sampled=self.max_batch_size * self.num_neg_samples,
-      unique=True,
-      range_max=self.vocabulary_size,
-      distortion=0.75,
-      unigrams=self._counter)
-
-    sampled = sampled_values.sampled_candidates
-
-    sampled_mat = tf.reshape(sampled, [self.max_batch_size, self.num_neg_samples])
-
-
-     
 
   def loss(self, true_logits, sampled_logits):
     # [N]
@@ -260,18 +263,18 @@ class Word2Vec(object):
 
   def train(self, sents):
     self.build_vocab(sents)
-    self.initialize_variables()
+    labels, inputs, start_end, real_batch_size = self.initialize_variables()
 
     sents_iter = itertools.chain(*itertools.tee(sents, self.epochs))
     X_iter = self.generate_batch(sents_iter)
 
-    labels = tf.placeholder(dtype=tf.int64, shape=[self.max_batch_size])
-    inputs = tf.placeholder(dtype=tf.int64, shape=[self.max_batch_size])
-
     progress = tf.placeholder(dtype=tf.float32, shape=[])
     lr = tf.maximum(self.start_alpha * (1 - progress) + self.end_alpha * progress, self.end_alpha) 
 
-    true_logits, sampled_logits = self.logits_skip_gram(labels, inputs)
+    true_logits, sampled_logits = self.logits(labels=labels,
+                                              inputs=inputs,
+                                              start_end=start_end,
+                                              real_batch_size=real_batch_size)
     neg_loss = self.loss(true_logits, sampled_logits)
 
     train_step = tf.train.GradientDescentOptimizer(lr).minimize(neg_loss)
@@ -279,18 +282,34 @@ class Word2Vec(object):
     sess = tf.InteractiveSession()
     sess.run(tf.global_variables_initializer())
     average_loss = 0.
-    for step, X in enumerate(X_iter):
-      inputs_val, labels_val = X[:, 0], X[:, 1]
-      feed_dict = {inputs: inputs_val, labels: labels_val, progress: self._progress}
+    for step, val in enumerate(X_iter):
+
+      if self.skip_gram:
+        target_val, context_val, real_batch_size_val = val
+        feed_dict = { inputs: target_val,
+                      labels: context_val,
+                      real_batch_size: real_batch_size_val,
+                      progress: self._progress}
+      else:
+        target_val, context_val, start_end_val, real_batch_size_val = val
+        feed_dict = { inputs: context_val,
+                      labels: target_val,
+                      start_end: start_end_val,
+                      real_batch_size: real_batch_size_val,
+                      progress: self._progress}
 
       _, neg_loss_val, lr_val = sess.run([train_step, neg_loss, lr], feed_dict)
 
       average_loss += neg_loss_val.mean()
-      if step % 10000 == 0:
+      if step % self.log_every_steps == 0:
         if step > 0:
-          average_loss /= 10000
+          average_loss /= self.log_every_steps
         print "step =", step, "average_loss =", average_loss, "learning_rate =", lr_val
         average_loss = 0. 
   
     embeddings_final, weights_final, biases_final = self.embeddings.eval(), self.weights.eval(), self.biases.eval()
-    return embeddings_final, weights_final, biases_final, np.vstack([inputs_val, labels_val])
+    if self.norm_embeddings:
+      norm =  np.sqrt(np.square(embeddings_final).sum(axis=1, keepdims=True)) 
+      embeddings_final = embeddings_final / norm
+
+    return embeddings_final, weights_final, biases_final
