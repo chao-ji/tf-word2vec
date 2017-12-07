@@ -1,54 +1,68 @@
+import heapq
 import itertools
 import numpy as np
 import tensorflow as tf
+from datetime import datetime
+
+class VocabWord(object):
+  def __init__(self, **kwargs):
+    self.__dict__.update(kwargs)
+
+  def __lt__(self, other):
+    return self.count < other.count
+
+  def __str__(self):
+    def _which_format(kw):
+      val = self.__dict__[kw]
+      if isinstance(val, float):
+        return "%s=%g" % (kw, val)
+      else:
+        return "%s=%r" % (kw, val)
+
+    vals = [_which_format(kw) for kw in sorted(self.__dict__)]
+    return "%s(%s)" % (self.__class__.__name__, ', '.join(vals))
+
 
 class Word2Vec(object):
   def __init__(self,
-                embedding_size=100,
-                norm_embeddings=True,
-                window=5,
-                min_word_count=5,
                 max_vocab_size=None,
+                min_word_count=5,
                 subsample=1e-3,
-                sorted_vocab=True,
+                sorted_vocab=True,                
+                window=5,
+                embedding_size=100,
+                norm_embeddings=False,
+                num_neg_samples=5,
                 neg_sample_distortion=0.75,
+                cbow_mean=True,
                 start_alpha=0.025,
                 end_alpha=0.0001,
-                skip_gram=True,
-                cbow=False,
-                negative_sampling=True,
-                hierarchical_softmax=False,
-                cbow_mean=True,  
                 max_batch_size=64,
                 epochs=5,
-                num_neg_samples=5,
-                log_every_steps=10000,
+                log_every_n_steps=10000,
+                opts=[True,False,True,False],
                 seed=1):
-    self.embedding_size = embedding_size
-    self.norm_embeddings = norm_embeddings
-    self.window = window
-    self.min_word_count = min_word_count
+    if not(opts[0] ^ opts[1]):
+      raise ValueError("Exactly one of the two model architectures (`skip gram` or `cbow`) need to be specified.")
+    if not(opts[2] ^ opts[3]):
+      raise ValueError("Exactly one of the two training algorithms (`neg sampling` or `hierarchical_softmax`) need to be specified.")
     self.max_vocab_size = max_vocab_size
+    self.min_word_count = min_word_count
     self.subsample = subsample
     self.sorted_vocab = sorted_vocab
+    self.window = window
+    self.embedding_size = embedding_size
+    self.norm_embeddings = norm_embeddings
+    self.num_neg_samples = num_neg_samples
     self.neg_sample_distortion = neg_sample_distortion
+    self.cbow_mean = cbow_mean
     self.start_alpha=start_alpha
     self.end_alpha=end_alpha
-
-    if not(skip_gram ^ cbow):
-      raise ValueError("Precisely one of the two model architectures (Skip-gram or CBOW) should be specified.")
-    if not(negative_sampling ^ hierarchical_softmax):
-      raise ValueError("Precisely one of the two mechanisms (Negative-sampleing or Hierachical-softmax) should be specified.")
-
-    self.skip_gram = skip_gram
-    self.cbow = cbow
-    self.negative_sampling = negative_sampling
-    self.hierarchical_softmax = hierarchical_softmax
-    self.cbow_mean = cbow_mean
     self.max_batch_size = max_batch_size
     self.epochs = epochs
-    self.num_neg_samples = num_neg_samples
-    self.log_every_steps=log_every_steps
+    self.log_every_n_steps=log_every_n_steps
+
+    self.opts = opts
     self.seed = seed
 
     self.random_state = np.random.RandomState(seed)
@@ -61,9 +75,8 @@ class Word2Vec(object):
     self.num_words = None
     self._total_sents = None
 
-    self.embeddings = None
-    self.weights = None
-    self.biases = None
+    self.syn0 = None
+    self.syn1 = None
 
     self._progress = 0. 
     self._sents_covered = 0
@@ -75,25 +88,26 @@ class Word2Vec(object):
     index2word = []
     for word, count in raw_vocab.iteritems():
       if count >= self.min_word_count:
-        vocab[word] = {"count": count, "index": len(index2word)}
+        vocab[word] = VocabWord(count=count, index=len(index2word)) # {"count": count, "index": len(index2word)}
         index2word.append(word)
         num_words += count
 
     for word in index2word:
-      count = vocab[word]["count"]
+      count = vocab[word].count
       fraction = count / float(num_words)
       keep_prob = (np.sqrt(fraction / self.subsample) + 1) * (self.subsample / fraction)
       keep_prob = keep_prob if keep_prob < 1.0 else 1.0
-      vocab[word]["fraction"] = fraction
-      vocab[word]["keep_prob"] = keep_prob
+      vocab[word].fraction = fraction
+      vocab[word].keep_prob = keep_prob
+      vocab[word].word = word
 
     if self.sorted_vocab:
-      index2word.sort(key=lambda word: vocab[word]["count"], reverse=True)
+      index2word.sort(key=lambda word: vocab[word].count, reverse=True)
       for i, word in enumerate(index2word):
-        vocab[word]["index"] = i
+        vocab[word].index = i
     
     self._raw_vocab = raw_vocab
-    self._counter = [vocab[word]["count"] for word in index2word]
+    self._counter = [vocab[word].count for word in index2word]
     self.vocab = vocab
     self.vocabulary_size = len(vocab)
     self.index2word = index2word
@@ -106,50 +120,66 @@ class Word2Vec(object):
         raw_vocab.pop(word) 
 
   def _get_raw_vocab(self, sents):
-    raw_vocab = dict() 
+    raw_vocab = dict()
     word_count_cutoff = 1
-    max_vocab_size = self.max_vocab_size
     for sent in sents:
       for word in sent:
-        raw_vocab[word] = raw_vocab[word] + 1 if word in raw_vocab else 1 
-      if max_vocab_size and len(raw_vocab) > max_vocab_size:
+        raw_vocab[word] = raw_vocab[word] + 1 if word in raw_vocab else 1
+      if self.max_vocab_size and len(raw_vocab) > self.max_vocab_size:
         self._prune_vocab(raw_vocab, word_count_cutoff)
         word_count_cutoff += 1
     return raw_vocab
 
   def generate_batch(self, sents_iter):
-    def skip_gram(batch):
-      batch = np.vstack(batch)
-      target, context = batch[:, 0], batch[:, 1]
-      return target, context, target.shape[0]
+    vocab, index2word = self.vocab, self.index2word
 
-    def cbow(batch):
-      target = np.array(zip(*batch)[0])
-      tmp = zip(*batch)[1]
-      context = np.concatenate(tmp)
-      lengths = [0] + map(len, tmp)
-      cumsum = np.cumsum(lengths)
-      start_end = np.vstack([cumsum[:-1], cumsum[1:] - cumsum[:-1]]).T
-      return target, context, start_end, target.shape[0]
+    def sg_ns(batch):
+      return np.array(batch[0]), np.array(batch[1]), len(batch[0])
+    def cbow_ns(batch):
+      segments = batch[1]
+      ids = np.repeat(xrange(len(batch[0])), map(len, batch[1]))
+      return np.array([np.concatenate(segments),  ids]).T, np.array(batch[0]), len(batch[0])
+    def sg_hs(batch):
+      tmp = [np.array([vocab[index2word[i]].point, vocab[index2word[i]].code]).T for i in batch[1]]
+      ids = np.repeat(xrange(len(batch[0])), map(len, tmp)).reshape((-1, 1))
+      labels = np.hstack([np.vstack(tmp), ids])
+      inputs = np.repeat(batch[0], map(len, tmp))
+      return inputs, labels, len(batch[0])
+
+    def cbow_hs(batch):
+      pass
+
+    def _yield_fn(batch):
+      opts = self.opts
+      if opts[0] and opts[2]:
+        return sg_ns(batch)
+      elif opts[1] and opts[2]:
+        return cbow_ns(batch)
+      elif opts[0] and opts[3]:
+        return sg_hs(batch)
 
     generator = (v for sent in sents_iter for v in self._tarcon_per_sent(sent))
-    
+
     batch = []
     for v in generator:
       if len(batch) < self.max_batch_size:
         batch.append(v)
       else:
-        yield skip_gram(batch) if self.skip_gram else cbow(batch) 
+        batch = zip(*batch)
+        yield _yield_fn(batch) 
         batch = [v]
 
     if batch:
-      yield skip_gram(batch) if self.skip_gram else cbow(batch) 
+      batch = zip(*batch)
+      yield _yield_fn(batch)
       batch = []
-      
+
+  def _keep_word(self, word):
+    return word in self.vocab and self.random_state.binomial(1, self.vocab[word].keep_prob)
+
   def _tarcon_per_sent(self, sent):
-    keep_word = lambda word: (word in self.vocab) and self.random_state.binomial(1, self.vocab[word]["keep_prob"])
-    sent_trimmed = [self.vocab[word]["index"] for word in sent if keep_word(word)]
-    
+    sent_trimmed = [self.vocab[word].index for word in sent if self._keep_word(word)]
+
     def tarcon_per_target(word_index):
       target = sent_trimmed[word_index]
       reduced_size = self.random_state.randint(self.window)
@@ -160,11 +190,11 @@ class Word2Vec(object):
       contexts = before + after
 
       if contexts:
-        if self.skip_gram:
+        if self.opts[0]: # skip gram
           for context in contexts:
             yield target, context
-        else:
-          yield target, contexts 
+        else: # cbow
+          yield target, contexts
 
     for target in xrange(len(sent_trimmed)):
       for v in tarcon_per_target(target):
@@ -173,33 +203,48 @@ class Word2Vec(object):
     self._sents_covered += 1
     self._progress = self._sents_covered / self._total_sents
 
+  def build_huffman_tree(self):
+    vocab = self.vocab
+    heap = list(vocab.itervalues())
+    heapq.heapify(heap)
+    for i in xrange(len(vocab) - 1):
+      min1, min2 = heapq.heappop(heap), heapq.heappop(heap)
+      heapq.heappush(heap, VocabWord(count=min1.count+min2.count, index=i+len(vocab), left=min1, right=min2))
+
+    max_depth, stack = 0, [(heap[0], [], [])]
+    while stack:
+      node, code, point = stack.pop()
+      if node.index < len(vocab):
+        node.code, node.point, node.codelen = code, point, len(point)
+        max_depth = max(len(code), max_depth)
+      else:
+        point = np.array(list(point) + [node.index - len(vocab)], dtype=np.uint32)
+        stack.append((node.left, np.array(list(code) + [0], dtype=np.uint8), point))
+        stack.append((node.right, np.array(list(code) + [1], dtype=np.uint8), point))
+
   def initialize_variables(self):
     def seeded_vector(seed_string):
       random = np.random.RandomState(hash(seed_string) & 0xffffffff)
       return (random.rand(self.embedding_size) - 0.5) / self.embedding_size
 
-    embeddings_val = np.empty((self.vocabulary_size, self.embedding_size), dtype=np.float32)
+    syn0_val = np.empty((self.vocabulary_size, self.embedding_size), dtype=np.float32)
     for i in xrange(self.vocabulary_size):
-      embeddings_val[i] = seeded_vector(self.index2word[i] + str(self.seed))
+      syn0_val[i] = seeded_vector(self.index2word[i] + str(self.seed))
 
-    self.embeddings = tf.Variable(embeddings_val, dtype=tf.float32)
-    self.weights = tf.Variable(tf.truncated_normal([self.vocabulary_size, self.embedding_size],
+    self.syn0 = tf.Variable(syn0_val, dtype=tf.float32)
+#    self.syn1 = tf.Variable(tf.zeros([self.vocabulary_size, self.embedding_size]))
+    self.syn1 = tf.Variable(tf.truncated_normal([self.vocabulary_size, self.embedding_size],
                                 stddev=1.0/np.sqrt(self.embedding_size)), dtype=tf.float32)
-    self.biases = tf.Variable(tf.zeros([self.vocabulary_size]), dtype=tf.float32)
 
-    labels = tf.placeholder(dtype=tf.int64, shape=[None])
-    inputs = tf.placeholder(dtype=tf.int64, shape=[None])
-    start_end = tf.placeholder(dtype=tf.int32, shape=[None, 2])
+    inputs = tf.placeholder(dtype=tf.int64, shape=[None] if self.opts[0] else [None, 2])
+    labels = tf.placeholder(dtype=tf.int64, shape=[None] if self.opts[2] else [None, 3])
     real_batch_size = tf.placeholder(dtype=tf.int32, shape=[])
-    return labels, inputs, start_end, real_batch_size
 
-  def logits(self, labels=None, inputs=None, start_end=None, real_batch_size=None):
-    # [V, D]
-    embeddings = self.embeddings
-    # [V, D]
-    weights = self.weights
-    # [V]
-    biases = self.biases
+    return inputs, labels, real_batch_size
+
+  def loss_ns(self, inputs=None, labels=None, real_batch_size=None):
+    # [V, D], [V, D]
+    syn0, syn1 = self.syn0, self.syn1
 
     sampled_values = tf.nn.fixed_unigram_candidate_sampler(
       true_classes=tf.expand_dims(labels, 1),
@@ -210,60 +255,53 @@ class Word2Vec(object):
       distortion=0.75,
       unigrams=self._counter)
 
-    # [N * K] 
+    # [N * K]
     sampled = sampled_values.sampled_candidates
-
     # [N, K]
     sampled_mat = tf.reshape(sampled, [self.max_batch_size, self.num_neg_samples])
     sampled_mat = sampled_mat[:real_batch_size]
-
     # [N, D]
-    inputs_embeddings = tf.nn.embedding_lookup(embeddings, inputs)
-    if not self.skip_gram:
-      average_func = lambda row: tf.reduce_mean(tf.slice(inputs_embeddings,
-                                                [row[0], 0], [row[1], self.embedding_size]), 0)
-      sum_func = lambda row: tf.reduce_sum(tf.slice(inputs_embeddings,
-                                                [row[0], 0], [row[1], self.embedding_size]), 0)
-
-      func = average_func if self.cbow_mean else sum_func
-      inputs_embeddings = tf.map_fn(func, start_end, dtype=tf.float32)
-
+    if self.opts[0]: # skip_gram
+      inputs_syn0 = tf.nn.embedding_lookup(syn0, inputs)
+    else: # cbow
+      inputs_syn0 = tf.segment_sum(tf.nn.embedding_lookup(syn0, inputs[:, 0]), inputs[:, 1])
     # [N, D]
-    true_weights = tf.nn.embedding_lookup(weights, labels)
-
-    # [N]
-    true_biases = tf.nn.embedding_lookup(biases, labels)
-
+    true_syn1 = tf.nn.embedding_lookup(syn1, labels)
     # [N, K, D]
-    sampled_weights = tf.nn.embedding_lookup(weights, sampled_mat)
-
-    # [N, K]
-    sampled_biases = tf.nn.embedding_lookup(biases, sampled_mat)
-
+    sampled_syn1 = tf.nn.embedding_lookup(syn1, sampled_mat)
     # [N]
-    true_logits = tf.reduce_sum(tf.multiply(inputs_embeddings, true_weights), 1) + true_biases
-
+    true_logits = tf.reduce_sum(tf.multiply(inputs_syn0, true_syn1), 1)
     # [N, K] 
-    sampled_logits = tf.reduce_sum(tf.multiply(tf.expand_dims(inputs_embeddings, 1), sampled_weights), 2) + sampled_biases
-
-    return true_logits, sampled_logits
-
-  def loss(self, true_logits, sampled_logits):
+    sampled_logits = tf.reduce_sum(tf.multiply(tf.expand_dims(inputs_syn0, 1), sampled_syn1), 2)
     # [N]
     true_cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(
       labels=tf.ones_like(true_logits), logits=true_logits)
     # [N, K]
     sampled_cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(
       labels=tf.zeros_like(sampled_logits), logits=sampled_logits)
-
     # [N]
-    neg_loss = tf.reduce_sum(tf.concat([tf.expand_dims(true_cross_entropy, 1), sampled_cross_entropy], 1), 1)
-
+    neg_loss = true_cross_entropy + tf.reduce_sum(sampled_cross_entropy, 1)
     return neg_loss
 
-  def train(self, sents):
+  def loss_hs(self, inputs=None, labels=None, real_batch_size=None):
+    # [V, D], [V, D]
+    syn0, syn1 = self.syn0, self.syn1
+
+    inputs_syn0 = tf.nn.embedding_lookup(syn0, inputs)
+    labels_syn1 = tf.nn.embedding_lookup(syn1, labels[:, 0])
+
+    logits_batch = tf.reduce_sum(tf.multiply(inputs_syn0, labels_syn1), 1)
+    labels_batch = tf.cast(labels[:, 1], tf.float32)
+
+    loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=labels_batch, logits=logits_batch)
+    hs_loss = tf.segment_sum(loss, labels[:, 2])
+
+    return hs_loss
+
+  def train(self, sents, sess):
     self.build_vocab(sents)
-    labels, inputs, start_end, real_batch_size = self.initialize_variables()
+    if self.opts[3]:
+      self.build_huffman_tree()
 
     sents_iter = itertools.chain(*itertools.tee(sents, self.epochs))
     X_iter = self.generate_batch(sents_iter)
@@ -271,45 +309,33 @@ class Word2Vec(object):
     progress = tf.placeholder(dtype=tf.float32, shape=[])
     lr = tf.maximum(self.start_alpha * (1 - progress) + self.end_alpha * progress, self.end_alpha) 
 
-    true_logits, sampled_logits = self.logits(labels=labels,
-                                              inputs=inputs,
-                                              start_end=start_end,
-                                              real_batch_size=real_batch_size)
-    neg_loss = self.loss(true_logits, sampled_logits)
+    inputs, labels, real_batch_size = self.initialize_variables()
 
-    train_step = tf.train.GradientDescentOptimizer(lr).minimize(neg_loss)
+    if self.opts[2]:
+      loss = self.loss_ns(inputs=inputs, labels=labels, real_batch_size=real_batch_size)
+    else:
+      loss = self.loss_hs(inputs=inputs, labels=labels, real_batch_size=real_batch_size)
 
-    sess = tf.InteractiveSession()
+    train_step = tf.train.GradientDescentOptimizer(lr).minimize(loss)
     sess.run(tf.global_variables_initializer())
     average_loss = 0.
-    for step, val in enumerate(X_iter):
 
-      if self.skip_gram:
-        target_val, context_val, real_batch_size_val = val
-        feed_dict = { inputs: target_val,
-                      labels: context_val,
-                      real_batch_size: real_batch_size_val,
-                      progress: self._progress}
-      else:
-        target_val, context_val, start_end_val, real_batch_size_val = val
-        feed_dict = { inputs: context_val,
-                      labels: target_val,
-                      start_end: start_end_val,
-                      real_batch_size: real_batch_size_val,
-                      progress: self._progress}
+    for step, batch in enumerate(X_iter):
+      feed_dict = {inputs: batch[0], labels: batch[1], real_batch_size: batch[2]} 
+      feed_dict[progress] = self._progress
 
-      _, neg_loss_val, lr_val = sess.run([train_step, neg_loss, lr], feed_dict)
+      _, loss_val, lr_val = sess.run([train_step, loss, lr], feed_dict)
 
-      average_loss += neg_loss_val.mean()
-      if step % self.log_every_steps == 0:
+      average_loss += loss_val.mean()
+      if step % self.log_every_n_steps == 0:
         if step > 0:
-          average_loss /= self.log_every_steps
+          average_loss /= self.log_every_n_steps
         print "step =", step, "average_loss =", average_loss, "learning_rate =", lr_val
         average_loss = 0. 
-  
-    embeddings_final, weights_final, biases_final = self.embeddings.eval(), self.weights.eval(), self.biases.eval()
-    if self.norm_embeddings:
-      norm =  np.sqrt(np.square(embeddings_final).sum(axis=1, keepdims=True)) 
-      embeddings_final = embeddings_final / norm
 
-    return embeddings_final, weights_final, biases_final
+    syn0_final, syn1_final = self.syn0.eval(), self.syn1.eval()
+    if self.norm_embeddings:
+      norm =  np.sqrt(np.square(syn0_final).sum(axis=1, keepdims=True)) 
+      syn0_final = syn0_final / norm
+
+    return syn0_final, syn1_final 
