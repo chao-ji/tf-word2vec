@@ -34,7 +34,6 @@ class Word2Vec(object):
                 norm_embeddings=False,
                 num_neg_samples=5,
                 neg_sample_distortion=0.75,
-                cbow_mean=True,
                 start_alpha=0.025,
                 end_alpha=0.0001,
                 max_batch_size=64,
@@ -55,13 +54,11 @@ class Word2Vec(object):
     self.norm_embeddings = norm_embeddings
     self.num_neg_samples = num_neg_samples
     self.neg_sample_distortion = neg_sample_distortion
-    self.cbow_mean = cbow_mean
     self.start_alpha=start_alpha
     self.end_alpha=end_alpha
     self.max_batch_size = max_batch_size
     self.epochs = epochs
     self.log_every_n_steps=log_every_n_steps
-
     self.opts = opts
     self.seed = seed
 
@@ -136,18 +133,24 @@ class Word2Vec(object):
     def sg_ns(batch):
       return np.array(batch[0]), np.array(batch[1]), len(batch[0])
     def cbow_ns(batch):
-      segments = batch[1]
       ids = np.repeat(xrange(len(batch[0])), map(len, batch[1]))
-      return np.array([np.concatenate(segments),  ids]).T, np.array(batch[0]), len(batch[0])
+      return np.array([np.concatenate(batch[1]),  ids]).T, np.array(batch[0]), len(batch[0])
     def sg_hs(batch):
       tmp = [np.array([vocab[index2word[i]].point, vocab[index2word[i]].code]).T for i in batch[1]]
-      ids = np.repeat(xrange(len(batch[0])), map(len, tmp)).reshape((-1, 1))
+      lengths = map(len, tmp)
+      ids = np.repeat(xrange(len(batch[0])), lengths).reshape((-1, 1))
       labels = np.hstack([np.vstack(tmp), ids])
-      inputs = np.repeat(batch[0], map(len, tmp))
+      inputs = np.repeat(batch[0], lengths)
       return inputs, labels, len(batch[0])
-
     def cbow_hs(batch):
-      pass
+      tmp = [np.array([vocab[index2word[i]].point, vocab[index2word[i]].code]).T for i in batch[0]] 
+      lengths = map(len, tmp)
+      ids = np.repeat(xrange(len(batch[0])), lengths).reshape((-1, 1))
+      labels = np.hstack([np.vstack(tmp), ids])
+      contexts_rep = np.repeat(batch[1], lengths)
+      contexts_rep_ids = np.repeat(xrange(len(contexts_rep)), map(len, contexts_rep))
+      inputs = np.array([np.concatenate(contexts_rep), contexts_rep_ids]).T
+      return inputs, labels, len(batch[0])
 
     def _yield_fn(batch):
       opts = self.opts
@@ -157,6 +160,8 @@ class Word2Vec(object):
         return cbow_ns(batch)
       elif opts[0] and opts[3]:
         return sg_hs(batch)
+      elif opts[1] and opts[3]:
+        return cbow_hs(batch)
 
     generator = (v for sent in sents_iter for v in self._tarcon_per_sent(sent))
 
@@ -203,7 +208,7 @@ class Word2Vec(object):
     self._sents_covered += 1
     self._progress = self._sents_covered / self._total_sents
 
-  def build_huffman_tree(self):
+  def create_binary_tree(self):
     vocab = self.vocab
     heap = list(vocab.itervalues())
     heapq.heapify(heap)
@@ -245,7 +250,6 @@ class Word2Vec(object):
   def loss_ns(self, inputs=None, labels=None, real_batch_size=None):
     # [V, D], [V, D]
     syn0, syn1 = self.syn0, self.syn1
-
     sampled_values = tf.nn.fixed_unigram_candidate_sampler(
       true_classes=tf.expand_dims(labels, 1),
       num_true=1,
@@ -254,7 +258,6 @@ class Word2Vec(object):
       range_max=self.vocabulary_size,
       distortion=0.75,
       unigrams=self._counter)
-
     # [N * K]
     sampled = sampled_values.sampled_candidates
     # [N, K]
@@ -264,7 +267,7 @@ class Word2Vec(object):
     if self.opts[0]: # skip_gram
       inputs_syn0 = tf.nn.embedding_lookup(syn0, inputs)
     else: # cbow
-      inputs_syn0 = tf.segment_sum(tf.nn.embedding_lookup(syn0, inputs[:, 0]), inputs[:, 1])
+      inputs_syn0 = tf.segment_mean(tf.nn.embedding_lookup(syn0, inputs[:, 0]), inputs[:, 1])
     # [N, D]
     true_syn1 = tf.nn.embedding_lookup(syn1, labels)
     # [N, K, D]
@@ -286,22 +289,21 @@ class Word2Vec(object):
   def loss_hs(self, inputs=None, labels=None, real_batch_size=None):
     # [V, D], [V, D]
     syn0, syn1 = self.syn0, self.syn1
-
-    inputs_syn0 = tf.nn.embedding_lookup(syn0, inputs)
+    if self.opts[0]: # skip_gram
+      inputs_syn0 = tf.nn.embedding_lookup(syn0, inputs)
+    else: # cbow
+      inputs_syn0 = tf.segment_mean(tf.nn.embedding_lookup(syn0, inputs[:, 0]), inputs[:, 1])
     labels_syn1 = tf.nn.embedding_lookup(syn1, labels[:, 0])
-
     logits_batch = tf.reduce_sum(tf.multiply(inputs_syn0, labels_syn1), 1)
     labels_batch = tf.cast(labels[:, 1], tf.float32)
-
     loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=labels_batch, logits=logits_batch)
     hs_loss = tf.segment_sum(loss, labels[:, 2])
-
     return hs_loss
 
   def train(self, sents, sess):
     self.build_vocab(sents)
     if self.opts[3]:
-      self.build_huffman_tree()
+      self.create_binary_tree()
 
     sents_iter = itertools.chain(*itertools.tee(sents, self.epochs))
     X_iter = self.generate_batch(sents_iter)
@@ -311,9 +313,9 @@ class Word2Vec(object):
 
     inputs, labels, real_batch_size = self.initialize_variables()
 
-    if self.opts[2]:
+    if self.opts[2]: # negative sampling
       loss = self.loss_ns(inputs=inputs, labels=labels, real_batch_size=real_batch_size)
-    else:
+    else: # hierarchical softmax
       loss = self.loss_hs(inputs=inputs, labels=labels, real_batch_size=real_batch_size)
 
     train_step = tf.train.GradientDescentOptimizer(lr).minimize(loss)
