@@ -3,6 +3,7 @@ import itertools
 import numpy as np
 import tensorflow as tf
 from datetime import datetime
+from scipy.spatial.distance import cosine
 
 class VocabWord(object):
   def __init__(self, **kwargs):
@@ -66,17 +67,33 @@ class Word2Vec(object):
 
     self._raw_vocab = None
     self._counter = None
-    self.vocab = None
-    self.vocabulary_size = None
-    self.index2word = None
-    self.num_words = None
+    self._vocab = None
+    self._vocabulary_size = None
+    self._index2word = None
+    self._num_words = None
     self._total_sents = None
 
-    self.syn0 = None
-    self.syn1 = None
+    self._syn0 = None
+    self._syn1 = None
 
     self._progress = 0. 
     self._sents_covered = 0
+
+  @property
+  def vocab(self):
+    return self._vocab
+
+  @property
+  def vocabulary_size(self):
+    return self._vocabulary_size
+
+  @property
+  def index2word(self):
+    return self._index2word
+
+  @property
+  def num_words(self):
+    return self._num_words
 
   def build_vocab(self, sents):
     num_words = 0
@@ -105,10 +122,10 @@ class Word2Vec(object):
     
     self._raw_vocab = raw_vocab
     self._counter = [vocab[word].count for word in index2word]
-    self.vocab = vocab
-    self.vocabulary_size = len(vocab)
-    self.index2word = index2word
-    self.num_words = num_words
+    self._vocab = vocab
+    self._vocabulary_size = len(vocab)
+    self._index2word = index2word
+    self._num_words = num_words
     self._total_sents = float(len(sents) * self.epochs)
 
   def _prune_vocab(self, raw_vocab, word_count_cutoff):     
@@ -128,64 +145,78 @@ class Word2Vec(object):
     return raw_vocab
 
   def generate_batch(self, sents_iter):
-    vocab, index2word = self.vocab, self.index2word
+    vocab, index2word = self._vocab, self._index2word
 
-    def sg_ns(batch):
-      return np.array(batch[0]), np.array(batch[1]), len(batch[0])
-    def cbow_ns(batch):
-      ids = np.repeat(xrange(len(batch[0])), map(len, batch[1]))
-      return np.array([np.concatenate(batch[1]),  ids]).T, np.array(batch[0]), len(batch[0])
-    def sg_hs(batch):
+    def _sg_ns(batch):
+      return np.array(batch[0]), np.array(batch[1])
+    def _cbow_ns(batch):
+      segment_ids = np.repeat(xrange(len(batch[0])), map(len, batch[1]))
+      return np.array([np.concatenate(batch[1]), segment_ids]).T, np.array(batch[0])
+    def _sg_hs(batch):
       tmp = [np.array([vocab[index2word[i]].point, vocab[index2word[i]].code]).T for i in batch[1]]
-      lengths = map(len, tmp)
-      ids = np.repeat(xrange(len(batch[0])), lengths).reshape((-1, 1))
-      labels = np.hstack([np.vstack(tmp), ids])
-      inputs = np.repeat(batch[0], lengths)
-      return inputs, labels, len(batch[0])
-    def cbow_hs(batch):
+      code_lengths = map(len, tmp)
+      segment_ids = np.repeat(xrange(len(batch[0])), code_lengths).reshape((-1, 1))
+      labels = np.hstack([np.vstack(tmp), segment_ids])
+      inputs = np.repeat(batch[0], code_lengths)
+      return inputs, labels
+    def _cbow_hs(batch):
       tmp = [np.array([vocab[index2word[i]].point, vocab[index2word[i]].code]).T for i in batch[0]] 
-      lengths = map(len, tmp)
-      ids = np.repeat(xrange(len(batch[0])), lengths).reshape((-1, 1))
-      labels = np.hstack([np.vstack(tmp), ids])
-      contexts_rep = np.repeat(batch[1], lengths)
-      contexts_rep_ids = np.repeat(xrange(len(contexts_rep)), map(len, contexts_rep))
-      inputs = np.array([np.concatenate(contexts_rep), contexts_rep_ids]).T
-      return inputs, labels, len(batch[0])
+      code_lengths = map(len, tmp)
+      segment_ids = np.repeat(xrange(len(batch[0])), code_lengths).reshape((-1, 1))
+      labels = np.hstack([np.vstack(tmp), segment_ids])
+      contexts_repeated = np.repeat(batch[1], code_lengths)
+      contexts_repeated_segment_ids = np.repeat(xrange(len(contexts_repeated)), map(len, contexts_repeated))
+      inputs = np.array([np.concatenate(contexts_repeated), contexts_repeated_segment_ids]).T
+      return inputs, labels
 
     def _yield_fn(batch):
       opts = self.opts
       if opts[0] and opts[2]:
-        return sg_ns(batch)
+        return _sg_ns(batch)
       elif opts[1] and opts[2]:
-        return cbow_ns(batch)
+        return _cbow_ns(batch)
       elif opts[0] and opts[3]:
-        return sg_hs(batch)
+        return _sg_hs(batch)
       elif opts[1] and opts[3]:
-        return cbow_hs(batch)
+        return _cbow_hs(batch)
 
-    generator = (v for sent in sents_iter for v in self._tarcon_per_sent(sent))
+    tarcon_generator = (tarcon for sent in sents_iter for tarcon in self._tarcon_per_sent(sent))
 
     batch = []
-    for v in generator:
+    for tarcon in tarcon_generator:
       if len(batch) < self.max_batch_size:
-        batch.append(v)
+        batch.append(tarcon)
       else:
         batch = zip(*batch)
         yield _yield_fn(batch) 
-        batch = [v]
+        batch = [tarcon]
 
-    if batch:
+    if batch: # last batch if not empty
       batch = zip(*batch)
       yield _yield_fn(batch)
       batch = []
 
   def _keep_word(self, word):
-    return word in self.vocab and self.random_state.binomial(1, self.vocab[word].keep_prob)
+    """Determine if input word will be kept
+
+    Args:
+      `word`: string
+    Returns/Yields:
+      bool
+    """
+    return word in self._vocab and self.random_state.binomial(1, self._vocab[word].keep_prob)
 
   def _tarcon_per_sent(self, sent):
-    sent_trimmed = [self.vocab[word].index for word in sent if self._keep_word(word)]
+    """Generator: yields 2-tuples of tar(get) and con(text) words per sentences
 
-    def tarcon_per_target(word_index):
+    Args:
+      `sent`: list of strings
+    Returns/Yields:
+      2-tuple of word indices
+    """
+    sent_trimmed = [self._vocab[word].index for word in sent if self._keep_word(word)]
+
+    def _tarcon_per_target(word_index):
       target = sent_trimmed[word_index]
       reduced_size = self.random_state.randint(self.window)
       before = map(lambda i: sent_trimmed[i],
@@ -201,15 +232,15 @@ class Word2Vec(object):
         else: # cbow
           yield target, contexts
 
-    for target in xrange(len(sent_trimmed)):
-      for v in tarcon_per_target(target):
-        yield v
+    for word_index in xrange(len(sent_trimmed)):
+      for tarcon in _tarcon_per_target(word_index):
+        yield tarcon
 
     self._sents_covered += 1
     self._progress = self._sents_covered / self._total_sents
 
   def create_binary_tree(self):
-    vocab = self.vocab
+    vocab = self._vocab
     heap = list(vocab.itervalues())
     heapq.heapify(heap)
     for i in xrange(len(vocab) - 1):
@@ -232,37 +263,35 @@ class Word2Vec(object):
       random = np.random.RandomState(hash(seed_string) & 0xffffffff)
       return (random.rand(self.embedding_size) - 0.5) / self.embedding_size
 
-    syn0_val = np.empty((self.vocabulary_size, self.embedding_size), dtype=np.float32)
-    for i in xrange(self.vocabulary_size):
-      syn0_val[i] = seeded_vector(self.index2word[i] + str(self.seed))
+    syn0_val = np.empty((self._vocabulary_size, self.embedding_size), dtype=np.float32)
+    for i in xrange(self._vocabulary_size):
+      syn0_val[i] = seeded_vector(self._index2word[i] + str(self.seed))
 
-    self.syn0 = tf.Variable(syn0_val, dtype=tf.float32)
-#    self.syn1 = tf.Variable(tf.zeros([self.vocabulary_size, self.embedding_size]))
-    self.syn1 = tf.Variable(tf.truncated_normal([self.vocabulary_size, self.embedding_size],
+    self._syn0 = tf.Variable(syn0_val, dtype=tf.float32)
+    self._syn1 = tf.Variable(tf.truncated_normal([self._vocabulary_size, self.embedding_size],
                                 stddev=1.0/np.sqrt(self.embedding_size)), dtype=tf.float32)
 
     inputs = tf.placeholder(dtype=tf.int64, shape=[None] if self.opts[0] else [None, 2])
     labels = tf.placeholder(dtype=tf.int64, shape=[None] if self.opts[2] else [None, 3])
-    real_batch_size = tf.placeholder(dtype=tf.int32, shape=[])
 
-    return inputs, labels, real_batch_size
+    return inputs, labels
 
-  def loss_ns(self, inputs=None, labels=None, real_batch_size=None):
+  def loss_ns(self, inputs, labels):
     # [V, D], [V, D]
-    syn0, syn1 = self.syn0, self.syn1
+    syn0, syn1 = self._syn0, self._syn1
     sampled_values = tf.nn.fixed_unigram_candidate_sampler(
       true_classes=tf.expand_dims(labels, 1),
       num_true=1,
       num_sampled=self.max_batch_size * self.num_neg_samples,
-      unique=True,
-      range_max=self.vocabulary_size,
+      unique=False,
+      range_max=self._vocabulary_size,
       distortion=0.75,
       unigrams=self._counter)
     # [N * K]
     sampled = sampled_values.sampled_candidates
     # [N, K]
     sampled_mat = tf.reshape(sampled, [self.max_batch_size, self.num_neg_samples])
-    sampled_mat = sampled_mat[:real_batch_size]
+    sampled_mat = sampled_mat[:tf.shape(labels)[0]]
     # [N, D]
     if self.opts[0]: # skip_gram
       inputs_syn0 = tf.nn.embedding_lookup(syn0, inputs)
@@ -273,9 +302,9 @@ class Word2Vec(object):
     # [N, K, D]
     sampled_syn1 = tf.nn.embedding_lookup(syn1, sampled_mat)
     # [N]
-    true_logits = tf.reduce_sum(tf.multiply(inputs_syn0, true_syn1), 1)
+    true_logits = tf.reduce_sum(tf.multiply(inputs_syn0, true_syn1), 1)          
     # [N, K] 
-    sampled_logits = tf.reduce_sum(tf.multiply(tf.expand_dims(inputs_syn0, 1), sampled_syn1), 2)
+    sampled_logits = tf.reduce_sum(tf.multiply(tf.expand_dims(inputs_syn0, 1), sampled_syn1), 2)  
     # [N]
     true_cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(
       labels=tf.ones_like(true_logits), logits=true_logits)
@@ -286,9 +315,9 @@ class Word2Vec(object):
     neg_loss = true_cross_entropy + tf.reduce_sum(sampled_cross_entropy, 1)
     return neg_loss
 
-  def loss_hs(self, inputs=None, labels=None, real_batch_size=None):
+  def loss_hs(self, inputs, labels):
     # [V, D], [V, D]
-    syn0, syn1 = self.syn0, self.syn1
+    syn0, syn1 = self._syn0, self._syn1
     if self.opts[0]: # skip_gram
       inputs_syn0 = tf.nn.embedding_lookup(syn0, inputs)
     else: # cbow
@@ -311,19 +340,19 @@ class Word2Vec(object):
     progress = tf.placeholder(dtype=tf.float32, shape=[])
     lr = tf.maximum(self.start_alpha * (1 - progress) + self.end_alpha * progress, self.end_alpha) 
 
-    inputs, labels, real_batch_size = self.initialize_variables()
+    inputs, labels = self.initialize_variables()
 
     if self.opts[2]: # negative sampling
-      loss = self.loss_ns(inputs=inputs, labels=labels, real_batch_size=real_batch_size)
+      loss = self.loss_ns(inputs, labels)
     else: # hierarchical softmax
-      loss = self.loss_hs(inputs=inputs, labels=labels, real_batch_size=real_batch_size)
+      loss = self.loss_hs(inputs, labels)
 
     train_step = tf.train.GradientDescentOptimizer(lr).minimize(loss)
     sess.run(tf.global_variables_initializer())
     average_loss = 0.
 
     for step, batch in enumerate(X_iter):
-      feed_dict = {inputs: batch[0], labels: batch[1], real_batch_size: batch[2]} 
+      feed_dict = {inputs: batch[0], labels: batch[1]} 
       feed_dict[progress] = self._progress
 
       _, loss_val, lr_val = sess.run([train_step, loss, lr], feed_dict)
@@ -335,9 +364,28 @@ class Word2Vec(object):
         print "step =", step, "average_loss =", average_loss, "learning_rate =", lr_val
         average_loss = 0. 
 
-    syn0_final, syn1_final = self.syn0.eval(), self.syn1.eval()
+    syn0_final, syn1_final = self._syn0.eval(), self._syn1.eval()
     if self.norm_embeddings:
       norm =  np.sqrt(np.square(syn0_final).sum(axis=1, keepdims=True)) 
       syn0_final = syn0_final / norm
 
-    return syn0_final, syn1_final 
+    return Embeddings(syn0_final, self.vocab, self.index2word)
+
+class Embeddings(object):
+  def __init__(self, syn0_final, vocab, index2word):
+    self.syn0_final = syn0_final
+    self.vocab = vocab
+    self.index2word = index2word
+
+  def most_similar(self, word, k):
+    if word not in self.vocab:
+      raise ValueError("Word '%s' not found in the vocabulary" % word)
+    if k >= self.syn0_final.shape[0]:
+      raise ValueError("k = %d greater than vocabulary size" % k)
+
+    v0 = self.syn0_final[self.vocab[word].index]
+
+    sims = [(i, 1-cosine(v, v0)) for (i, v) in enumerate(self.syn0_final)]
+    sims.sort(key=lambda p: -p[1])
+
+    return [(self.index2word[index], sim) for (index, sim) in sims[:k+1]]
