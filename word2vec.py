@@ -23,6 +23,7 @@ class VocabWord(object):
     vals = [_which_format(kw) for kw in sorted(self.__dict__)]
     return "%s(%s)" % (self.__class__.__name__, ', '.join(vals))
 
+dtype = tf.float32
 
 class Word2Vec(object):
   def __init__(self,
@@ -267,9 +268,9 @@ class Word2Vec(object):
     for i in xrange(self._vocabulary_size):
       syn0_val[i] = seeded_vector(self._index2word[i] + str(self.seed))
 
-    self._syn0 = tf.Variable(syn0_val, dtype=tf.float32)
+    self._syn0 = tf.Variable(syn0_val, dtype=dtype)
     self._syn1 = tf.Variable(tf.truncated_normal([self._vocabulary_size, self.embedding_size],
-                                stddev=1.0/np.sqrt(self.embedding_size)), dtype=tf.float32)
+                                stddev=1.0/np.sqrt(self.embedding_size)), dtype=dtype)
 
     inputs = tf.placeholder(dtype=tf.int64, shape=[None] if self.opts[0] else [None, 2])
     labels = tf.placeholder(dtype=tf.int64, shape=[None] if self.opts[2] else [None, 3])
@@ -312,22 +313,28 @@ class Word2Vec(object):
     sampled_cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(
       labels=tf.zeros_like(sampled_logits), logits=sampled_logits)
     # [N]
-    neg_loss = true_cross_entropy + tf.reduce_sum(sampled_cross_entropy, 1)
-    return neg_loss
+    loss = tf.reduce_mean(tf.concat([tf.expand_dims(true_cross_entropy, 1), sampled_cross_entropy], 1), 1)
+    return loss
 
   def loss_hs(self, inputs, labels):
     # [V, D], [V, D]
     syn0, syn1 = self._syn0, self._syn1
+    # [SUM(CODE_LENGTHS), D]
     if self.opts[0]: # skip_gram
       inputs_syn0 = tf.nn.embedding_lookup(syn0, inputs)
     else: # cbow
       inputs_syn0 = tf.segment_mean(tf.nn.embedding_lookup(syn0, inputs[:, 0]), inputs[:, 1])
+    # [SUM(CODE_LENGTHS), D]
     labels_syn1 = tf.nn.embedding_lookup(syn1, labels[:, 0])
+    # [SUM(CODE_LENGTHS)]
     logits_batch = tf.reduce_sum(tf.multiply(inputs_syn0, labels_syn1), 1)
-    labels_batch = tf.cast(labels[:, 1], tf.float32)
+    # [SUM(CODE_LENGTHS)]
+    labels_batch = tf.cast(labels[:, 1], dtype)
+    # [SUM(CODE_LENGTHS)]
     loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=labels_batch, logits=logits_batch)
-    hs_loss = tf.segment_sum(loss, labels[:, 2])
-    return hs_loss
+    # [N]
+    loss = tf.segment_mean(loss, labels[:, 2])
+    return loss
 
   def train(self, sents, sess):
     self.build_vocab(sents)
@@ -337,7 +344,7 @@ class Word2Vec(object):
     sents_iter = itertools.chain(*itertools.tee(sents, self.epochs))
     X_iter = self.generate_batch(sents_iter)
 
-    progress = tf.placeholder(dtype=tf.float32, shape=[])
+    progress = tf.placeholder(dtype=dtype, shape=[])
     lr = tf.maximum(self.start_alpha * (1 - progress) + self.end_alpha * progress, self.end_alpha) 
 
     inputs, labels = self.initialize_variables()
