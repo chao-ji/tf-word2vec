@@ -23,78 +23,62 @@ class VocabWord(object):
     vals = [_which_format(kw) for kw in sorted(self.__dict__)]
     return "%s(%s)" % (self.__class__.__name__, ', '.join(vals))
 
-dtype = tf.float32
 
 class Word2Vec(object):
+  __slots__ = ("max_vocab_size", "min_count", "sample", "sorted_vocab", "window", "size",
+    "norm_embeddings", "negatives", "power", "alpha", "min_alpha", "max_batch_size", "epochs",
+    "log_every_n_steps", "hidden_layer_toggle", "output_layer_toggle", "ns_add_bias", "ns_sum_cols",
+    "hs_add_bias", "hs_sum_cols", "seed", "_random_state", "_raw_vocab", "_unigram_count",
+    "vocab", "vocabulary_size", "index2word", "index2word", "num_words", "total_sents", "_syn0",
+    "_syn1", "_biases", "_progress", "_sents_covered")
+
   def __init__(self,
                 max_vocab_size=None,
-                min_word_count=5,
-                subsample=1e-3,
+                min_count=5,
+                sample=1e-3,
                 sorted_vocab=True,                
                 window=5,
-                embedding_size=100,
+                size=100,
                 norm_embeddings=False,
-                num_neg_samples=5,
-                neg_sample_distortion=0.75,
-                start_alpha=0.025,
-                end_alpha=0.0001,
+                negatives=5,
+                power=0.75,
+                alpha=0.025,
+                min_alpha=0.0001,
                 max_batch_size=64,
                 epochs=5,
                 log_every_n_steps=10000,
-                opts=[True,False,True,False],
+                hidden_layer_toggle=True,
+                output_layer_toggle=True,
+                ns_add_bias=True,
+                ns_sum_cols=True,
+                hs_add_bias=True,
+                hs_sum_cols=False,
                 seed=1):
-    if not(opts[0] ^ opts[1]):
-      raise ValueError("Exactly one of the two model architectures (`skip gram` or `cbow`) need to be specified.")
-    if not(opts[2] ^ opts[3]):
-      raise ValueError("Exactly one of the two training algorithms (`neg sampling` or `hierarchical_softmax`) need to be specified.")
     self.max_vocab_size = max_vocab_size
-    self.min_word_count = min_word_count
-    self.subsample = subsample
+    self.min_count = min_count
+    self.sample = sample
     self.sorted_vocab = sorted_vocab
     self.window = window
-    self.embedding_size = embedding_size
+    self.size = size
     self.norm_embeddings = norm_embeddings
-    self.num_neg_samples = num_neg_samples
-    self.neg_sample_distortion = neg_sample_distortion
-    self.start_alpha=start_alpha
-    self.end_alpha=end_alpha
+    self.negatives = negatives
+    self.power = power
+    self.alpha = alpha
+    self.min_alpha = min_alpha
     self.max_batch_size = max_batch_size
     self.epochs = epochs
-    self.log_every_n_steps=log_every_n_steps
-    self.opts = opts
+    self.log_every_n_steps = log_every_n_steps
+    self.hidden_layer_toggle = hidden_layer_toggle
+    self.output_layer_toggle = output_layer_toggle
+    self.ns_add_bias = ns_add_bias
+    self.ns_sum_cols = ns_sum_cols
+    self.hs_add_bias = hs_add_bias
+    self.hs_sum_cols = hs_sum_cols
     self.seed = seed
 
-    self.random_state = np.random.RandomState(seed)
-
-    self._raw_vocab = None
-    self._counter = None
-    self._vocab = None
-    self._vocabulary_size = None
-    self._index2word = None
-    self._num_words = None
-    self._total_sents = None
-
-    self._syn0 = None
-    self._syn1 = None
-
+    self._random_state = np.random.RandomState(seed)
     self._progress = 0. 
     self._sents_covered = 0
-
-  @property
-  def vocab(self):
-    return self._vocab
-
-  @property
-  def vocabulary_size(self):
-    return self._vocabulary_size
-
-  @property
-  def index2word(self):
-    return self._index2word
-
-  @property
-  def num_words(self):
-    return self._num_words
 
   def build_vocab(self, sents):
     num_words = 0
@@ -102,7 +86,7 @@ class Word2Vec(object):
     vocab = dict()
     index2word = []
     for word, count in raw_vocab.iteritems():
-      if count >= self.min_word_count:
+      if count >= self.min_count:
         vocab[word] = VocabWord(count=count, index=len(index2word)) # {"count": count, "index": len(index2word)}
         index2word.append(word)
         num_words += count
@@ -110,7 +94,7 @@ class Word2Vec(object):
     for word in index2word:
       count = vocab[word].count
       fraction = count / float(num_words)
-      keep_prob = (np.sqrt(fraction / self.subsample) + 1) * (self.subsample / fraction)
+      keep_prob = (np.sqrt(fraction / self.sample) + 1) * (self.sample / fraction)
       keep_prob = keep_prob if keep_prob < 1.0 else 1.0
       vocab[word].fraction = fraction
       vocab[word].keep_prob = keep_prob
@@ -122,12 +106,12 @@ class Word2Vec(object):
         vocab[word].index = i
     
     self._raw_vocab = raw_vocab
-    self._counter = [vocab[word].count for word in index2word]
-    self._vocab = vocab
-    self._vocabulary_size = len(vocab)
-    self._index2word = index2word
-    self._num_words = num_words
-    self._total_sents = float(len(sents) * self.epochs)
+    self._unigram_count = [vocab[word].count for word in index2word]
+    self.vocab = vocab
+    self.vocabulary_size = len(vocab)
+    self.index2word = index2word
+    self.num_words = num_words
+    self.total_sents = len(sents) * self.epochs
 
   def _prune_vocab(self, raw_vocab, word_count_cutoff):     
     for word in raw_vocab.keys():
@@ -145,8 +129,11 @@ class Word2Vec(object):
         word_count_cutoff += 1
     return raw_vocab
 
+  def _get_tarcon_generator(self, sents_iter):
+    return (tarcon for sent in sents_iter for tarcon in self._tarcon_per_sent(sent)) 
+
   def generate_batch(self, sents_iter):
-    vocab, index2word = self._vocab, self._index2word
+    vocab, index2word = self.vocab, self.index2word
 
     def _sg_ns(batch):
       return np.array(batch[0]), np.array(batch[1])
@@ -171,17 +158,19 @@ class Word2Vec(object):
       return inputs, labels
 
     def _yield_fn(batch):
-      opts = self.opts
-      if opts[0] and opts[2]:
+      h_toggle = self.hidden_layer_toggle
+      out_toggle = self.output_layer_toggle
+
+      if h_toggle and out_toggle:
         return _sg_ns(batch)
-      elif opts[1] and opts[2]:
+      elif (not h_toggle) and out_toggle:
         return _cbow_ns(batch)
-      elif opts[0] and opts[3]:
+      elif h_toggle and (not out_toggle):
         return _sg_hs(batch)
-      elif opts[1] and opts[3]:
+      elif (not h_toggle) and (not out_toggle):
         return _cbow_hs(batch)
 
-    tarcon_generator = (tarcon for sent in sents_iter for tarcon in self._tarcon_per_sent(sent))
+    tarcon_generator = self._get_tarcon_generator(sents_iter) 
 
     batch = []
     for tarcon in tarcon_generator:
@@ -205,7 +194,23 @@ class Word2Vec(object):
     Returns/Yields:
       bool
     """
-    return word in self._vocab and self.random_state.binomial(1, self._vocab[word].keep_prob)
+    return word in self.vocab and self._random_state.binomial(1, self.vocab[word].keep_prob)
+
+  def _tarcon_per_target(self, sent_trimmed, word_index):
+    target = sent_trimmed[word_index]
+    reduced_size = self._random_state.randint(self.window)
+    before = map(lambda i: sent_trimmed[i],
+              xrange(max(word_index - self.window + reduced_size, 0), word_index))
+    after = map(lambda i: sent_trimmed[i],
+              xrange(word_index + 1, min(word_index + 1 + self.window - reduced_size, len(sent_trimmed))))
+    contexts = before + after
+
+    if contexts:
+      if self.hidden_layer_toggle: # skip gram
+        for context in contexts:
+          yield target, context
+      else: # cbow
+        yield target, contexts
 
   def _tarcon_per_sent(self, sent):
     """Generator: yields 2-tuples of tar(get) and con(text) words per sentences
@@ -215,33 +220,17 @@ class Word2Vec(object):
     Returns/Yields:
       2-tuple of word indices
     """
-    sent_trimmed = [self._vocab[word].index for word in sent if self._keep_word(word)]
-
-    def _tarcon_per_target(word_index):
-      target = sent_trimmed[word_index]
-      reduced_size = self.random_state.randint(self.window)
-      before = map(lambda i: sent_trimmed[i],
-                xrange(max(word_index - self.window + reduced_size, 0), word_index))
-      after = map(lambda i: sent_trimmed[i],
-                xrange(word_index + 1, min(word_index + 1 + self.window - reduced_size, len(sent_trimmed))))
-      contexts = before + after
-
-      if contexts:
-        if self.opts[0]: # skip gram
-          for context in contexts:
-            yield target, context
-        else: # cbow
-          yield target, contexts
+    sent_trimmed = [self.vocab[word].index for word in sent if self._keep_word(word)]
 
     for word_index in xrange(len(sent_trimmed)):
-      for tarcon in _tarcon_per_target(word_index):
+      for tarcon in self._tarcon_per_target(sent_trimmed, word_index):
         yield tarcon
 
     self._sents_covered += 1
-    self._progress = self._sents_covered / self._total_sents
+    self._progress = self._sents_covered / float(self.total_sents)
 
   def create_binary_tree(self):
-    vocab = self._vocab
+    vocab = self.vocab
     heap = list(vocab.itervalues())
     heapq.heapify(heap)
     for i in xrange(len(vocab) - 1):
@@ -259,53 +248,59 @@ class Word2Vec(object):
         stack.append((node.left, np.array(list(code) + [0], dtype=np.uint8), point))
         stack.append((node.right, np.array(list(code) + [1], dtype=np.uint8), point))
 
+  def _seeded_vector(self, seed_string):
+    random = np.random.RandomState(hash(seed_string) & 0xffffffff)
+    return (random.rand(self.size) - 0.5) / self.size
+
   def initialize_variables(self):
-    def seeded_vector(seed_string):
-      random = np.random.RandomState(hash(seed_string) & 0xffffffff)
-      return (random.rand(self.embedding_size) - 0.5) / self.embedding_size
+    syn0_val = np.empty((self.vocabulary_size, self.size), dtype=np.float32)
+    for i in xrange(self.vocabulary_size):
+      syn0_val[i] = self._seeded_vector(self.index2word[i] + str(self.seed))
 
-    syn0_val = np.empty((self._vocabulary_size, self.embedding_size), dtype=np.float32)
-    for i in xrange(self._vocabulary_size):
-      syn0_val[i] = seeded_vector(self._index2word[i] + str(self.seed))
-
-    self._syn0 = tf.Variable(syn0_val, dtype=dtype)
-    self._syn1 = tf.Variable(tf.truncated_normal([self._vocabulary_size, self.embedding_size],
-                                stddev=1.0/np.sqrt(self.embedding_size)), dtype=dtype)
-
-    inputs = tf.placeholder(dtype=tf.int64, shape=[None] if self.opts[0] else [None, 2])
-    labels = tf.placeholder(dtype=tf.int64, shape=[None] if self.opts[2] else [None, 3])
-
+    self._syn0 = tf.Variable(syn0_val, dtype=tf.float32)
+    self._syn1 = tf.Variable(tf.truncated_normal([self.vocabulary_size, self.size],
+                                stddev=1.0/np.sqrt(self.size)), dtype=tf.float32)
+    self._biases = tf.Variable(tf.zeros([self.vocabulary_size]), dtype=tf.float32)
+    inputs = tf.placeholder(dtype=tf.int64, shape=[None] if self.hidden_layer_toggle else [None, 2])
+    labels = tf.placeholder(dtype=tf.int64, shape=[None] if self.output_layer_toggle else [None, 3])
     return inputs, labels
 
+  def _input_to_hidden(self, syn0, inputs):
+    if self.hidden_layer_toggle: # skip_gram
+      return tf.nn.embedding_lookup(syn0, inputs)
+    else: # cbow
+      return tf.segment_mean(tf.nn.embedding_lookup(syn0, inputs[:, 0]), inputs[:, 1])
+  
   def loss_ns(self, inputs, labels):
     # [V, D], [V, D]
     syn0, syn1 = self._syn0, self._syn1
     sampled_values = tf.nn.fixed_unigram_candidate_sampler(
       true_classes=tf.expand_dims(labels, 1),
       num_true=1,
-      num_sampled=self.max_batch_size * self.num_neg_samples,
-      unique=False,
-      range_max=self._vocabulary_size,
-      distortion=0.75,
-      unigrams=self._counter)
+      num_sampled=self.max_batch_size * self.negatives,
+      unique=True,
+      range_max=self.vocabulary_size,
+      distortion=self.power,
+      unigrams=self._unigram_count)
     # [N * K]
     sampled = sampled_values.sampled_candidates
     # [N, K]
-    sampled_mat = tf.reshape(sampled, [self.max_batch_size, self.num_neg_samples])
+    sampled_mat = tf.reshape(sampled, [self.max_batch_size, self.negatives])
     sampled_mat = sampled_mat[:tf.shape(labels)[0]]
     # [N, D]
-    if self.opts[0]: # skip_gram
-      inputs_syn0 = tf.nn.embedding_lookup(syn0, inputs)
-    else: # cbow
-      inputs_syn0 = tf.segment_mean(tf.nn.embedding_lookup(syn0, inputs[:, 0]), inputs[:, 1])
+    inputs_syn0 = self._input_to_hidden(syn0, inputs)
     # [N, D]
     true_syn1 = tf.nn.embedding_lookup(syn1, labels)
     # [N, K, D]
     sampled_syn1 = tf.nn.embedding_lookup(syn1, sampled_mat)
     # [N]
-    true_logits = tf.reduce_sum(tf.multiply(inputs_syn0, true_syn1), 1)          
+    true_logits = tf.reduce_sum(tf.multiply(inputs_syn0, true_syn1), 1)
     # [N, K] 
-    sampled_logits = tf.reduce_sum(tf.multiply(tf.expand_dims(inputs_syn0, 1), sampled_syn1), 2)  
+    sampled_logits = tf.reduce_sum(tf.multiply(tf.expand_dims(inputs_syn0, 1), sampled_syn1), 2)
+
+    if self.ns_add_bias:
+      true_logits += tf.nn.embedding_lookup(self._biases, labels)
+      sampled_logits += tf.nn.embedding_lookup(self._biases, sampled_mat)
     # [N]
     true_cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(
       labels=tf.ones_like(true_logits), logits=true_logits)
@@ -313,43 +308,50 @@ class Word2Vec(object):
     sampled_cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(
       labels=tf.zeros_like(sampled_logits), logits=sampled_logits)
     # [N]
-    loss = tf.reduce_mean(tf.concat([tf.expand_dims(true_cross_entropy, 1), sampled_cross_entropy], 1), 1)
+    loss = tf.concat([tf.expand_dims(true_cross_entropy, 1), sampled_cross_entropy], 1)
+    loss = tf.reduce_sum(loss, 1) if self.ns_sum_cols else tf.reduce_mean(loss, 1)
     return loss
 
   def loss_hs(self, inputs, labels):
     # [V, D], [V, D]
     syn0, syn1 = self._syn0, self._syn1
     # [SUM(CODE_LENGTHS), D]
-    if self.opts[0]: # skip_gram
-      inputs_syn0 = tf.nn.embedding_lookup(syn0, inputs)
-    else: # cbow
-      inputs_syn0 = tf.segment_mean(tf.nn.embedding_lookup(syn0, inputs[:, 0]), inputs[:, 1])
+    inputs_syn0 = self._input_to_hidden(syn0, inputs)
     # [SUM(CODE_LENGTHS), D]
     labels_syn1 = tf.nn.embedding_lookup(syn1, labels[:, 0])
     # [SUM(CODE_LENGTHS)]
     logits_batch = tf.reduce_sum(tf.multiply(inputs_syn0, labels_syn1), 1)
+
+    if self.hs_add_bias:
+      logits_batch += tf.nn.embedding_lookup(self._biases, labels[:, 0])
     # [SUM(CODE_LENGTHS)]
-    labels_batch = tf.cast(labels[:, 1], dtype)
+    labels_batch = tf.cast(labels[:, 1], tf.float32)
     # [SUM(CODE_LENGTHS)]
     loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=labels_batch, logits=logits_batch)
     # [N]
-    loss = tf.segment_mean(loss, labels[:, 2])
+    loss = tf.segment_sum(loss, labels[:, 2]) if self.hs_sum_cols else tf.segment_mean(loss, labels[:, 2])
     return loss
+
+  def _get_sent_iter(self, sents):
+    return itertools.chain(*itertools.tee(sents, self.epochs))
+
+  def _save_embedding(self, syn0_final):
+    return WordEmbeddings(syn0_final, self.vocab, self.index2word)
 
   def train(self, sents, sess):
     self.build_vocab(sents)
-    if self.opts[3]:
+    if not self.output_layer_toggle:
       self.create_binary_tree()
 
-    sents_iter = itertools.chain(*itertools.tee(sents, self.epochs))
+    sents_iter = self._get_sent_iter(sents)
     X_iter = self.generate_batch(sents_iter)
 
-    progress = tf.placeholder(dtype=dtype, shape=[])
-    lr = tf.maximum(self.start_alpha * (1 - progress) + self.end_alpha * progress, self.end_alpha) 
+    progress = tf.placeholder(dtype=tf.float32, shape=[])
+    lr = tf.maximum(self.alpha * (1 - progress) + self.min_alpha * progress, self.min_alpha) 
 
     inputs, labels = self.initialize_variables()
 
-    if self.opts[2]: # negative sampling
+    if self.output_layer_toggle: # negative sampling
       loss = self.loss_ns(inputs, labels)
     else: # hierarchical softmax
       loss = self.loss_hs(inputs, labels)
@@ -376,9 +378,9 @@ class Word2Vec(object):
       norm =  np.sqrt(np.square(syn0_final).sum(axis=1, keepdims=True)) 
       syn0_final = syn0_final / norm
 
-    return Embeddings(syn0_final, self.vocab, self.index2word)
+    return self._save_embedding(syn0_final)
 
-class Embeddings(object):
+class WordEmbeddings(object):
   def __init__(self, syn0_final, vocab, index2word):
     self.syn0_final = syn0_final
     self.vocab = vocab
