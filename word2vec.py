@@ -3,7 +3,6 @@ import itertools
 import numpy as np
 import tensorflow as tf
 from datetime import datetime
-from scipy.spatial.distance import cosine
 
 class VocabWord(object):
   def __init__(self, **kwargs):
