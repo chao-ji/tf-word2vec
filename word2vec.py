@@ -349,8 +349,7 @@ class Word2Vec(object):
     average_loss = 0.
 
     for step, batch in enumerate(batch_iter):
-      feed_dict = {inputs: batch[0], labels: batch[1]} 
-      feed_dict[progress] = self._progress
+      feed_dict = {inputs: batch[0], labels: batch[1], progress: self._progress} 
 
       _, loss_val, lr_val = sess.run([train_step, loss, lr], feed_dict)
 
@@ -361,9 +360,9 @@ class Word2Vec(object):
         print "step =", step, "average_loss =", average_loss, "learning_rate =", lr_val
         average_loss = 0. 
 
-    syn0_final, syn1_final = self._syn0.eval(), self._syn1.eval()
+    syn0_final = self._syn0.eval()
     if self.norm_embeddings:
-      norm =  np.sqrt(np.square(syn0_final).sum(axis=1, keepdims=True)) 
+      norm = np.linalg.norm(syn0_final, axis=1)
       syn0_final = syn0_final / norm
 
     return self._save_embedding(syn0_final)
