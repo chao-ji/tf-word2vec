@@ -158,16 +158,16 @@ class Word2Vec(object):
       return inputs, labels
 
     def _yield_fn(batch):
-      h_toggle = self.hidden_layer_toggle
+      hidden_toggle = self.hidden_layer_toggle
       out_toggle = self.output_layer_toggle
 
-      if h_toggle and out_toggle:
+      if hidden_toggle and out_toggle:
         return _sg_ns(batch)
-      elif (not h_toggle) and out_toggle:
+      elif (not hidden_toggle) and out_toggle:
         return _cbow_ns(batch)
-      elif h_toggle and (not out_toggle):
+      elif hidden_toggle and (not out_toggle):
         return _sg_hs(batch)
-      elif (not h_toggle) and (not out_toggle):
+      elif (not hidden_toggle) and (not out_toggle):
         return _cbow_hs(batch)
 
     tarcon_generator = self._get_tarcon_generator(sents_iter) 
@@ -187,13 +187,7 @@ class Word2Vec(object):
       batch = []
 
   def _keep_word(self, word):
-    """Determine if input word will be kept
-
-    Args:
-      `word`: string
-    Returns/Yields:
-      bool
-    """
+    """Determine if input word will be kept."""
     return word in self.vocab and self._random_state.binomial(1, self.vocab[word].keep_prob)
 
   def _tarcon_per_target(self, sent_trimmed, word_index):
@@ -213,13 +207,7 @@ class Word2Vec(object):
         yield target, contexts
 
   def _tarcon_per_sent(self, sent):
-    """Generator: yields 2-tuples of tar(get) and con(text) words per sentences
-
-    Args:
-      `sent`: list of strings
-    Returns/Yields:
-      2-tuple of word indices
-    """
+    """Generator: yields 2-tuples of tar(get) and con(text) words per sentences."""
     sent_trimmed = [self.vocab[word].index for word in sent if self._keep_word(word)]
 
     for word_index in xrange(len(sent_trimmed)):
@@ -277,7 +265,7 @@ class Word2Vec(object):
     sampled_values = tf.nn.fixed_unigram_candidate_sampler(
       true_classes=tf.expand_dims(labels, 1),
       num_true=1,
-      num_sampled=self.max_batch_size * self.negatives,
+      num_sampled=self.max_batch_size*self.negatives,
       unique=True,
       range_max=self.vocabulary_size,
       distortion=self.power,
@@ -344,7 +332,7 @@ class Word2Vec(object):
       self.create_binary_tree()
 
     sents_iter = self._get_sent_iter(sents)
-    X_iter = self.generate_batch(sents_iter)
+    batch_iter = self.generate_batch(sents_iter)
 
     progress = tf.placeholder(dtype=tf.float32, shape=[])
     lr = tf.maximum(self.alpha * (1 - progress) + self.min_alpha * progress, self.min_alpha) 
@@ -360,7 +348,7 @@ class Word2Vec(object):
     sess.run(tf.global_variables_initializer())
     average_loss = 0.
 
-    for step, batch in enumerate(X_iter):
+    for step, batch in enumerate(batch_iter):
       feed_dict = {inputs: batch[0], labels: batch[1]} 
       feed_dict[progress] = self._progress
 
@@ -380,11 +368,18 @@ class Word2Vec(object):
 
     return self._save_embedding(syn0_final)
 
+
 class WordEmbeddings(object):
   def __init__(self, syn0_final, vocab, index2word):
     self.syn0_final = syn0_final
     self.vocab = vocab
     self.index2word = index2word
+
+  def __contains__(self, word):
+    return word in self.vocab
+
+  def __getitem__(self, word):
+    return self.syn0_final[self.vocab[word].index]
 
   def most_similar(self, word, k):
     if word not in self.vocab:
@@ -393,8 +388,14 @@ class WordEmbeddings(object):
       raise ValueError("k = %d greater than vocabulary size" % k)
 
     v0 = self.syn0_final[self.vocab[word].index]
+    sims = np.sum(v0*self.syn0_final, 1) / (np.linalg.norm(v0)*np.linalg.norm(self.syn0_final, axis=1)) 
 
-    sims = [(i, 1-cosine(v, v0)) for (i, v) in enumerate(self.syn0_final)]
-    sims.sort(key=lambda p: -p[1])
-
-    return [(self.index2word[index], sim) for (index, sim) in sims[:k+1]]
+    # maintain a sliding min priority queue to keep track of k+1 largest elements
+    min_pq = zip(sims[:k+1], xrange(k+1))
+    heapq.heapify(min_pq)
+    for i in np.arange(k+1, len(self.vocab)):
+      if sims[i] > min_pq[0][0]:
+        min_pq[0] = sims[i], i
+        heapq.heapify(min_pq)
+    min_pq = sorted(min_pq, key=lambda p: -p[0]) 
+    return [(self.index2word[i], sim) for sim, i in min_pq[1:]]
