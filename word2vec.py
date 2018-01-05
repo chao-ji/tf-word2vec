@@ -26,8 +26,8 @@ class VocabWord(object):
 class Word2Vec(object):
   __slots__ = ("max_vocab_size", "min_count", "sample", "sorted_vocab", "window", "size",
     "norm_embeddings", "negatives", "power", "alpha", "min_alpha", "max_batch_size", "epochs",
-    "log_every_n_steps", "hidden_layer_toggle", "output_layer_toggle", "ns_add_bias", "ns_sum_cols",
-    "hs_add_bias", "hs_sum_cols", "seed", "_random_state", "_raw_vocab", "_unigram_count",
+    "log_every_n_steps", "hidden_layer_toggle", "output_layer_toggle", "ns_add_bias",
+    "hs_add_bias", "clip_gradient", "seed", "_random_state", "_raw_vocab", "_unigram_count",
     "vocab", "vocabulary_size", "index2word", "index2word", "num_words", "total_sents", "_syn0",
     "_syn1", "_biases", "_progress", "_sents_covered")
 
@@ -49,9 +49,8 @@ class Word2Vec(object):
                 hidden_layer_toggle=True,
                 output_layer_toggle=True,
                 ns_add_bias=True,
-                ns_sum_cols=True,
                 hs_add_bias=True,
-                hs_sum_cols=False,
+                clip_gradient=False,
                 seed=1):
     self.max_vocab_size = max_vocab_size
     self.min_count = min_count
@@ -70,9 +69,8 @@ class Word2Vec(object):
     self.hidden_layer_toggle = hidden_layer_toggle
     self.output_layer_toggle = output_layer_toggle
     self.ns_add_bias = ns_add_bias
-    self.ns_sum_cols = ns_sum_cols
     self.hs_add_bias = hs_add_bias
-    self.hs_sum_cols = hs_sum_cols
+    self.clip_gradient = clip_gradient
     self.seed = seed
 
     self._random_state = np.random.RandomState(seed)
@@ -112,11 +110,6 @@ class Word2Vec(object):
     self.num_words = num_words
     self.total_sents = len(sents) * self.epochs
 
-  def _prune_vocab(self, raw_vocab, word_count_cutoff):     
-    for word in raw_vocab.keys():
-      if raw_vocab[word] < word_count_cutoff:
-        raw_vocab.pop(word) 
-
   def _get_raw_vocab(self, sents):
     raw_vocab = dict()
     word_count_cutoff = 1
@@ -124,7 +117,9 @@ class Word2Vec(object):
       for word in sent:
         raw_vocab[word] = raw_vocab[word] + 1 if word in raw_vocab else 1
       if self.max_vocab_size and len(raw_vocab) > self.max_vocab_size:
-        self._prune_vocab(raw_vocab, word_count_cutoff)
+        for word in raw_vocab.keys():
+          if raw_vocab[word] < word_count_cutoff:
+            raw_vocab.pop(word)
         word_count_cutoff += 1
     return raw_vocab
 
@@ -140,17 +135,15 @@ class Word2Vec(object):
       segment_ids = np.repeat(xrange(len(batch[0])), map(len, batch[1]))
       return np.array([np.concatenate(batch[1]), segment_ids]).T, np.array(batch[0])
     def _sg_hs(batch):
-      tmp = [np.array([vocab[index2word[i]].point, vocab[index2word[i]].code]).T for i in batch[1]]
-      code_lengths = map(len, tmp)
-      segment_ids = np.repeat(xrange(len(batch[0])), code_lengths).reshape((-1, 1))
-      labels = np.hstack([np.vstack(tmp), segment_ids])
+      paths = [np.array([vocab[index2word[i]].point, vocab[index2word[i]].code]).T for i in batch[1]]
+      code_lengths = map(len, paths)
+      labels = np.vstack(paths)
       inputs = np.repeat(batch[0], code_lengths)
       return inputs, labels
     def _cbow_hs(batch):
-      tmp = [np.array([vocab[index2word[i]].point, vocab[index2word[i]].code]).T for i in batch[0]] 
-      code_lengths = map(len, tmp)
-      segment_ids = np.repeat(xrange(len(batch[0])), code_lengths).reshape((-1, 1))
-      labels = np.hstack([np.vstack(tmp), segment_ids])
+      paths = [np.array([vocab[index2word[i]].point, vocab[index2word[i]].code]).T for i in batch[0]] 
+      code_lengths = map(len, paths)
+      labels = np.vstack(paths)
       contexts_repeated = np.repeat(batch[1], code_lengths)
       contexts_repeated_segment_ids = np.repeat(xrange(len(contexts_repeated)), map(len, contexts_repeated))
       inputs = np.array([np.concatenate(contexts_repeated), contexts_repeated_segment_ids]).T
@@ -192,11 +185,11 @@ class Word2Vec(object):
   def _tarcon_per_target(self, sent_trimmed, word_index):
     target = sent_trimmed[word_index]
     reduced_size = self._random_state.randint(self.window)
-    before = map(lambda i: sent_trimmed[i],
+    left = map(lambda i: sent_trimmed[i],
               xrange(max(word_index - self.window + reduced_size, 0), word_index))
-    after = map(lambda i: sent_trimmed[i],
+    right = map(lambda i: sent_trimmed[i],
               xrange(word_index + 1, min(word_index + 1 + self.window - reduced_size, len(sent_trimmed))))
-    contexts = before + after
+    contexts = left + right
 
     if contexts:
       if self.hidden_layer_toggle: # skip gram
@@ -249,7 +242,7 @@ class Word2Vec(object):
                                 stddev=1.0/np.sqrt(self.size)), dtype=tf.float32)
     self._biases = tf.Variable(tf.zeros([self.vocabulary_size]), dtype=tf.float32)
     inputs = tf.placeholder(dtype=tf.int64, shape=[None] if self.hidden_layer_toggle else [None, 2])
-    labels = tf.placeholder(dtype=tf.int64, shape=[None] if self.output_layer_toggle else [None, 3])
+    labels = tf.placeholder(dtype=tf.int64, shape=[None] if self.output_layer_toggle else [None, 2])
     return inputs, labels
 
   def _input_to_hidden(self, syn0, inputs):
@@ -294,9 +287,8 @@ class Word2Vec(object):
     # [N, K]
     sampled_cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(
       labels=tf.zeros_like(sampled_logits), logits=sampled_logits)
-    # [N]
+    # [N, K+1]
     loss = tf.concat([tf.expand_dims(true_cross_entropy, 1), sampled_cross_entropy], 1)
-    loss = tf.reduce_sum(loss, 1) if self.ns_sum_cols else tf.reduce_mean(loss, 1)
     return loss
 
   def loss_hs(self, inputs, labels):
@@ -315,8 +307,6 @@ class Word2Vec(object):
     labels_batch = tf.cast(labels[:, 1], tf.float32)
     # [SUM(CODE_LENGTHS)]
     loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=labels_batch, logits=logits_batch)
-    # [N]
-    loss = tf.segment_sum(loss, labels[:, 2]) if self.hs_sum_cols else tf.segment_mean(loss, labels[:, 2])
     return loss
 
   def _get_sent_iter(self, sents):
@@ -324,6 +314,15 @@ class Word2Vec(object):
 
   def _save_embedding(self, syn0_final):
     return WordEmbeddings(syn0_final, self.vocab, self.index2word)
+
+  def _get_train_step(self, lr, loss):
+    sgd = tf.train.GradientDescentOptimizer(lr)
+    if self.clip_gradient:
+      gradients, variables = zip(*sgd.compute_gradients(loss))
+      gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
+      return sgd.apply_gradients(zip(gradients, variables))
+    else:
+      return sgd.minimize(loss)
 
   def train(self, sents, sess):
     self.build_vocab(sents)
@@ -343,7 +342,7 @@ class Word2Vec(object):
     else: # hierarchical softmax
       loss = self.loss_hs(inputs, labels)
 
-    train_step = tf.train.GradientDescentOptimizer(lr).minimize(loss)
+    train_step = self._get_train_step(lr, loss)
     sess.run(tf.global_variables_initializer())
     average_loss = 0.
 
