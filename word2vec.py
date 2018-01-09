@@ -32,11 +32,11 @@ class Word2Vec(object):
   """
 
   __slots__ = ("max_vocab_size", "min_count", "sample", "sorted_vocab", "window", "size",
-    "norm_embeddings", "negatives", "power", "alpha", "min_alpha", "max_batch_size", "epochs",
+    "norm_embed", "negatives", "power", "alpha", "min_alpha", "max_batch_size", "epochs",
     "log_every_n_steps", "hidden_layer_toggle", "output_layer_toggle", "ns_add_bias",
-    "hs_add_bias", "clip_gradient", "seed", "_random_state", "_raw_vocab", "_unigram_count",
-    "vocab", "vocabulary_size", "index2word", "num_words", "total_sents", "_syn0",
-    "_syn1", "_biases", "_progress", "_sents_covered")
+    "hs_add_bias", "clip_gradient", "seed", "_random_state", "_raw_corpus", "_raw_vocab", 
+    "_unigram_count", "vocab", "vocab_size", "index2word", "corpus_size", 
+    "total_sents", "_syn0", "_syn1", "_biases", "_progress", "_sents_covered")
 
   def __init__(self,
                 max_vocab_size=None,      # Maximum vocabulary size
@@ -45,7 +45,7 @@ class Word2Vec(object):
                 sorted_vocab=True,        # Sort the vocabulary in descending order of word count
                 window=5,                 # Maximum number of words on either side of a window
                 size=100,                 # Embedding size
-                norm_embeddings=False,    # Normalize word embeddings to unit norm
+                norm_embed=False,         # Normalize word embeddings to unit norm
                 negatives=5,              # Number of negative words for `ns`
                 power=0.75,               # Distortion of the sampling algorithm for `ns`
                 alpha=0.025,              # Initial learning rate
@@ -65,7 +65,7 @@ class Word2Vec(object):
     self.sorted_vocab = sorted_vocab
     self.window = window
     self.size = size
-    self.norm_embeddings = norm_embeddings
+    self.norm_embed = norm_embed
     self.negatives = negatives
     self.power = power
     self.alpha = alpha
@@ -84,9 +84,22 @@ class Word2Vec(object):
     self._progress = 0. 
     self._sents_covered = 0
 
+  def _get_raw_vocab(self, sents):
+    raw_vocab = defaultdict(int)
+    min_reduce = 1
+    for sent in sents:
+      for word in sent:
+        raw_vocab[word] += 1
+      if self.max_vocab_size and len(raw_vocab) > self.max_vocab_size:
+        for word in raw_vocab.keys():
+          if raw_vocab[word] < min_reduce:
+            raw_vocab.pop(word)
+        min_reduce += 1
+    return raw_vocab
+
   def build_vocab(self, sents):
     """Builds vocabulary in a one-pass-run of the corpus"""
-    num_words = 0
+    corpus_size = 0
     raw_vocab = self._get_raw_vocab(sents)
     vocab = dict()
     index2word = []
@@ -94,11 +107,11 @@ class Word2Vec(object):
       if count >= self.min_count:
         vocab[word] = VocabWord(count=count, index=len(index2word))
         index2word.append(word)
-        num_words += count
+        corpus_size += count
 
     for word in index2word:
       count = vocab[word].count
-      fraction = count / float(num_words)
+      fraction = count / float(corpus_size)
       keep_prob = (np.sqrt(fraction / self.sample) + 1) * (self.sample / fraction)
       keep_prob = keep_prob if keep_prob < 1.0 else 1.0
       vocab[word].fraction = fraction
@@ -109,27 +122,15 @@ class Word2Vec(object):
       index2word.sort(key=lambda word: vocab[word].count, reverse=True)
       for i, word in enumerate(index2word):
         vocab[word].index = i
-    
+
+    self._raw_corpus = sents    
     self._raw_vocab = raw_vocab
     self._unigram_count = [vocab[word].count for word in index2word]
     self.vocab = vocab
-    self.vocabulary_size = len(vocab)
+    self.vocab_size = len(vocab)
     self.index2word = index2word
-    self.num_words = num_words
+    self.corpus_size = corpus_size
     self.total_sents = len(sents) * self.epochs
-
-  def _get_raw_vocab(self, sents):
-    raw_vocab = defaultdict(int)
-    word_count_cutoff = 1
-    for sent in sents:
-      for word in sent:
-        raw_vocab[word] += 1
-      if self.max_vocab_size and len(raw_vocab) > self.max_vocab_size:
-        for word in raw_vocab.keys():
-          if raw_vocab[word] < word_count_cutoff:
-            raw_vocab.pop(word)
-        word_count_cutoff += 1
-    return raw_vocab
 
   def _get_tarcon_generator(self, sents_iter):
     return (tarcon for sent in sents_iter for tarcon in self._tarcon_per_sent(sent)) 
@@ -191,13 +192,19 @@ class Word2Vec(object):
   def _keep_word(self, word):
     return word in self.vocab and self._random_state.binomial(1, self.vocab[word].keep_prob)
 
-  def _tarcon_per_target(self, sent_trimmed, word_index):
-    target = sent_trimmed[word_index]
+  def _words_to_left(self, index_list, word_index, reduced_size):
+    return map(lambda i: index_list[i], 
+      xrange(max(word_index - self.window + reduced_size, 0), word_index))
+
+  def _words_to_right(self, index_list, word_index, reduced_size):
+    return map(lambda i: index_list[i], 
+      xrange(word_index + 1, min(word_index + 1 + self.window - reduced_size, len(index_list))))
+
+  def _tarcon_per_target(self, index_list, word_index):
+    target = index_list[word_index]
     reduced_size = self._random_state.randint(self.window)
-    left = map(lambda i: sent_trimmed[i],
-              xrange(max(word_index - self.window + reduced_size, 0), word_index))
-    right = map(lambda i: sent_trimmed[i],
-              xrange(word_index + 1, min(word_index + 1 + self.window - reduced_size, len(sent_trimmed))))
+    left = self._words_to_left(index_list, word_index, reduced_size)
+    right = self._words_to_right(index_list, word_index, reduced_size)
     contexts = left + right
 
     if contexts:
@@ -208,10 +215,10 @@ class Word2Vec(object):
         yield target, contexts
 
   def _tarcon_per_sent(self, sent):
-    sent_trimmed = [self.vocab[word].index for word in sent if self._keep_word(word)]
+    sent_subsampled= [self.vocab[word].index for word in sent if self._keep_word(word)]
 
-    for word_index in xrange(len(sent_trimmed)):
-      for tarcon in self._tarcon_per_target(sent_trimmed, word_index):
+    for word_index in xrange(len(sent_subsampled)):
+      for tarcon in self._tarcon_per_target(sent_subsampled, word_index):
         yield tarcon
 
     self._sents_covered += 1
@@ -241,16 +248,18 @@ class Word2Vec(object):
     random = np.random.RandomState(hash(seed_string) & 0xffffffff)
     return (random.rand(self.size) - 0.5) / self.size
 
-  def initialize_variables(self):
+  def create_variables(self):
     """Defines `tf.Variable` and `tf.placeholfer`"""
-    syn0_val = np.empty((self.vocabulary_size, self.size), dtype=np.float32)
-    for i in xrange(self.vocabulary_size):
+    syn0_val = np.empty((self.vocab_size, self.size), dtype=np.float32)
+    for i in xrange(self.vocab_size):
       syn0_val[i] = self._seeded_vector(self.index2word[i] + str(self.seed))
+    syn1_rows = self.vocab_size if self.output_layer_toggle else self.vocab_size - 1
 
-    self._syn0 = tf.Variable(syn0_val, dtype=tf.float32)
-    self._syn1 = tf.Variable(tf.truncated_normal([self.vocabulary_size, self.size],
-                                stddev=1.0/np.sqrt(self.size)), dtype=tf.float32)
-    self._biases = tf.Variable(tf.zeros([self.vocabulary_size]), dtype=tf.float32)
+    self._syn0 = tf.get_variable("syn0", initializer=syn0_val, dtype=tf.float32)
+    self._syn1 = tf.get_variable("syn1", 
+      initializer=tf.truncated_normal([syn1_rows, self.size], 
+      stddev=1.0/np.sqrt(self.size)), dtype=tf.float32)
+    self._biases = tf.get_variable("biases", initializer=tf.zeros([syn1_rows]), dtype=tf.float32)
     inputs = tf.placeholder(dtype=tf.int64)
     labels = tf.placeholder(dtype=tf.int64)
     return inputs, labels
@@ -271,7 +280,7 @@ class Word2Vec(object):
       num_true=1,
       num_sampled=self.max_batch_size*self.negatives,
       unique=True,
-      range_max=self.vocabulary_size,
+      range_max=self.vocab_size,
       distortion=self.power,
       unigrams=self._unigram_count)
     # [N * K]
@@ -326,8 +335,8 @@ class Word2Vec(object):
   def _get_sent_iter(self, sents):
     return itertools.chain(*itertools.tee(sents, self.epochs))
 
-  def _save_embedding(self, syn0_final):
-    return WordEmbeddings(syn0_final, self.vocab, self.index2word)
+  def _wrap_syn0(self, syn0_final):
+    return WordVectors(syn0_final, self.vocab, self.index2word)
 
   def _get_train_step(self, lr, loss):
     sgd = tf.train.GradientDescentOptimizer(lr)
@@ -346,7 +355,7 @@ class Word2Vec(object):
       `sess`: TensorFlow session
 
     Returns:
-      `WordEmbeddings` instance
+      `WordVectors` instance
     """
     self.build_vocab(sents)
     if not self.output_layer_toggle:
@@ -354,16 +363,12 @@ class Word2Vec(object):
 
     sents_iter = self._get_sent_iter(sents)
     batch_iter = self.generate_batch(sents_iter)
-
     progress = tf.placeholder(dtype=tf.float32, shape=[])
     lr = tf.maximum(self.alpha * (1 - progress) + self.min_alpha * progress, self.min_alpha) 
 
-    inputs, labels = self.initialize_variables()
-
-    if self.output_layer_toggle: # negative sampling
-      loss = self.loss_ns(inputs, labels)
-    else: # hierarchical softmax
-      loss = self.loss_hs(inputs, labels)
+    inputs, labels = self.create_variables()
+    loss = self.loss_ns(inputs, labels) if self.output_layer_toggle \
+            else self.loss_hs(inputs, labels)
 
     train_step = self._get_train_step(lr, loss)
     sess.run(tf.global_variables_initializer())
@@ -382,15 +387,13 @@ class Word2Vec(object):
         average_loss = 0. 
 
     syn0_final = self._syn0.eval()
-    if self.norm_embeddings:
-      norm = np.linalg.norm(syn0_final, axis=1)
-      syn0_final = syn0_final / norm
-
-    return self._save_embedding(syn0_final)
+    if self.norm_embed:
+      syn0_final = syn0_final / np.linalg.norm(syn0_final, axis=1) 
+    return self._wrap_syn0(syn0_final)
 
 
-class WordEmbeddings(object):
-  """Trained word2vec model. Contains the index-to-word mapping, vocabulary and 
+class WordVectors(object):
+  """Trained word2vec model. Stores the index-to-word mapping, vocabulary and 
   final word embeddings"""
 
   def __init__(self, syn0_final, vocab, index2word):
