@@ -36,7 +36,7 @@ class Word2Vec(object):
     "log_every_n_steps", "hidden_layer_toggle", "output_layer_toggle", "ns_add_bias",
     "hs_add_bias", "clip_gradient", "seed", "_random_state", "_raw_corpus", "_raw_vocab", 
     "_unigram_count", "vocab", "vocab_size", "index2word", "corpus_size", 
-    "total_sents", "_syn0", "_syn1", "_biases", "_progress", "_sents_covered")
+    "_progress", "_sents_covered", "_total_sents", "syn0", "syn1", "biases")
 
   def __init__(self,
                 max_vocab_size=None,      # Maximum vocabulary size
@@ -81,8 +81,6 @@ class Word2Vec(object):
     self.seed = seed
 
     self._random_state = np.random.RandomState(seed)
-    self._progress = 0. 
-    self._sents_covered = 0
 
   def _get_raw_vocab(self, sents):
     raw_vocab = defaultdict(int)
@@ -130,7 +128,6 @@ class Word2Vec(object):
     self.vocab_size = len(vocab)
     self.index2word = index2word
     self.corpus_size = corpus_size
-    self.total_sents = len(sents) * self.epochs
 
   def _get_tarcon_generator(self, sents_iter):
     return (tarcon for sent in sents_iter for tarcon in self._tarcon_per_sent(sent)) 
@@ -222,7 +219,7 @@ class Word2Vec(object):
         yield tarcon
 
     self._sents_covered += 1
-    self._progress = self._sents_covered / float(self.total_sents)
+    self._progress = self._sents_covered / float(self._total_sents)
 
   def create_binary_tree(self):
     """Builds huffmann tree based on the frequencies of all vocabulary words"""
@@ -248,33 +245,28 @@ class Word2Vec(object):
     random = np.random.RandomState(hash(seed_string) & 0xffffffff)
     return (random.rand(self.size) - 0.5) / self.size
 
-  def create_variables(self):
-    """Defines `tf.Variable` and `tf.placeholfer`"""
-    syn0_val = np.empty((self.vocab_size, self.size), dtype=np.float32)
-    for i in xrange(self.vocab_size):
-      syn0_val[i] = self._seeded_vector(self.index2word[i] + str(self.seed))
+  def _get_syn0_init_val(self):
+    return np.vstack([self._seeded_vector(self.index2word[i] + str(self.seed)) 
+      for i in xrange(self.vocab_size)]).astype(np.float32)
+
+  def create_variables(self, syn0_init_val):
+    """Defines input embedings (`syn0`) and output embeddings (`syn1`, `biases`)"""
     syn1_rows = self.vocab_size if self.output_layer_toggle else self.vocab_size - 1
 
-    self._syn0 = tf.get_variable("syn0", initializer=syn0_val, dtype=tf.float32)
-    self._syn1 = tf.get_variable("syn1", 
+    syn0 = tf.get_variable("syn0", initializer=syn0_init_val, dtype=tf.float32)
+    syn1 = tf.get_variable("syn1", 
       initializer=tf.truncated_normal([syn1_rows, self.size], 
       stddev=1.0/np.sqrt(self.size)), dtype=tf.float32)
-    self._biases = tf.get_variable("biases", initializer=tf.zeros([syn1_rows]), dtype=tf.float32)
-    inputs = tf.placeholder(dtype=tf.int64)
-    labels = tf.placeholder(dtype=tf.int64)
-    return inputs, labels
+    biases = tf.get_variable("biases", initializer=tf.zeros([syn1_rows]), dtype=tf.float32)
+    return syn0, syn1, biases
 
   def _input_to_hidden(self, syn0, inputs):
     if self.hidden_layer_toggle: # skip_gram
       return tf.nn.embedding_lookup(syn0, inputs)
     else: # cbow
       return tf.segment_mean(tf.nn.embedding_lookup(syn0, inputs[:, 0]), inputs[:, 1])
-  
-  def loss_ns(self, inputs, labels):
-    """Loss for negative sampling (`ns`)
-    V=vocab_size, D=embed_size, N=batch_size, K=negative_samples"""
-    # [V, D], [V, D]
-    syn0, syn1 = self._syn0, self._syn1
+ 
+  def _loss_ns(self, inputs, labels, syn0, syn1, biases):
     sampled_values = tf.nn.fixed_unigram_candidate_sampler(
       true_classes=tf.expand_dims(labels, 1),
       num_true=1,
@@ -300,8 +292,8 @@ class Word2Vec(object):
     sampled_logits = tf.reduce_sum(tf.multiply(tf.expand_dims(inputs_syn0, 1), sampled_syn1), 2)
 
     if self.ns_add_bias:
-      true_logits += tf.nn.embedding_lookup(self._biases, labels)
-      sampled_logits += tf.nn.embedding_lookup(self._biases, sampled_mat)
+      true_logits += tf.nn.embedding_lookup(biases, labels)
+      sampled_logits += tf.nn.embedding_lookup(biases, sampled_mat)
     # [N]
     true_cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(
       labels=tf.ones_like(true_logits), logits=true_logits)
@@ -312,11 +304,7 @@ class Word2Vec(object):
     loss = tf.concat([tf.expand_dims(true_cross_entropy, 1), sampled_cross_entropy], 1)
     return loss
 
-  def loss_hs(self, inputs, labels):
-    """Loss for hierarchical sampling (`hs`) 
-    V=vocab_size, D=embed_size"""
-    # [V, D], [V, D]
-    syn0, syn1 = self._syn0, self._syn1
+  def _loss_hs(self, inputs, labels, syn0, syn1, biases):
     # [SUM(CODE_LENGTHS), D]
     inputs_syn0 = self._input_to_hidden(syn0, inputs)
     # [SUM(CODE_LENGTHS), D]
@@ -325,18 +313,20 @@ class Word2Vec(object):
     logits_batch = tf.reduce_sum(tf.multiply(inputs_syn0, labels_syn1), 1)
 
     if self.hs_add_bias:
-      logits_batch += tf.nn.embedding_lookup(self._biases, labels[:, 0])
+      logits_batch += tf.nn.embedding_lookup(biases, labels[:, 0])
     # [SUM(CODE_LENGTHS)]
     labels_batch = tf.cast(labels[:, 1], tf.float32)
     # [SUM(CODE_LENGTHS)]
     loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=labels_batch, logits=logits_batch)
     return loss
 
+  def build_graph(self, inputs, labels, syn0, syn1, biases):
+    loss = self._loss_ns(inputs, labels, syn0, syn1, biases) \
+      if self.output_layer_toggle else self._loss_hs(inputs, labels, syn0, syn1, biases)
+    return loss
+
   def _get_sent_iter(self, sents):
     return itertools.chain(*itertools.tee(sents, self.epochs))
-
-  def _wrap_syn0(self, syn0_final):
-    return WordVectors(syn0_final, self.vocab, self.index2word)
 
   def _get_train_step(self, lr, loss):
     sgd = tf.train.GradientDescentOptimizer(lr)
@@ -346,6 +336,22 @@ class Word2Vec(object):
       return sgd.apply_gradients(zip(gradients, variables))
     else:
       return sgd.minimize(loss)
+
+  def _do_train(self, batch_iter, inputs, labels, progress, lr, loss, train_step, sess):
+    average_loss = 0.
+    for step, batch in enumerate(batch_iter):
+      feed_dict = {inputs: batch[0], labels: batch[1], progress: self._progress}
+      _, loss_val, lr_val = sess.run([train_step, loss, lr], feed_dict)
+
+      average_loss += loss_val.mean()
+      if step % self.log_every_n_steps == 0:
+        if step > 0:
+          average_loss /= self.log_every_n_steps
+        print "step =", step, "average_loss =", average_loss, "learning_rate =", lr_val
+        average_loss = 0.    
+
+  def _reset(self, sents):
+    self._progress, self._sents_covered, self._total_sents = 0., 0, len(sents) * self.epochs
 
   def train(self, sents, sess):
     """Trains word2vec model.
@@ -360,36 +366,25 @@ class Word2Vec(object):
     self.build_vocab(sents)
     if not self.output_layer_toggle:
       self.create_binary_tree()
-
     sents_iter = self._get_sent_iter(sents)
     batch_iter = self.generate_batch(sents_iter)
-    progress = tf.placeholder(dtype=tf.float32, shape=[])
-    lr = tf.maximum(self.alpha * (1 - progress) + self.min_alpha * progress, self.min_alpha) 
 
-    inputs, labels = self.create_variables()
-    loss = self.loss_ns(inputs, labels) if self.output_layer_toggle \
-            else self.loss_hs(inputs, labels)
+    self._reset(sents)
 
+    self.syn0, self.syn1, self.biases = self.create_variables(self._get_syn0_init_val())
+    inputs, labels = tf.placeholder(dtype=tf.int64), tf.placeholder(dtype=tf.int64)
+    progress = tf.placeholder(dtype=tf.float32)
+    lr = tf.maximum(self.alpha * (1 - progress) + self.min_alpha * progress, self.min_alpha)
+    loss = self.build_graph(inputs, labels, self.syn0, self.syn1, self.biases)
     train_step = self._get_train_step(lr, loss)
     sess.run(tf.global_variables_initializer())
-    average_loss = 0.
 
-    for step, batch in enumerate(batch_iter):
-      feed_dict = {inputs: batch[0], labels: batch[1], progress: self._progress} 
+    self._do_train(batch_iter, inputs, labels, progress, lr, loss, train_step, sess)
 
-      _, loss_val, lr_val = sess.run([train_step, loss, lr], feed_dict)
-
-      average_loss += loss_val.mean()
-      if step % self.log_every_n_steps == 0:
-        if step > 0:
-          average_loss /= self.log_every_n_steps
-        print "step =", step, "average_loss =", average_loss, "learning_rate =", lr_val
-        average_loss = 0. 
-
-    syn0_final = self._syn0.eval()
+    syn0_final = self.syn0.eval()
     if self.norm_embed:
       syn0_final = syn0_final / np.linalg.norm(syn0_final, axis=1) 
-    return self._wrap_syn0(syn0_final)
+    return WordVectors(syn0_final, self.vocab, self.index2word)
 
 
 class WordVectors(object):
