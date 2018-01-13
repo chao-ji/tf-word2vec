@@ -39,7 +39,7 @@ class Word2Vec(object):
     "_progress", "_sents_covered", "_total_sents", "syn0", "syn1", "biases")
 
   def __init__(self,
-                max_vocab_size=None,      # Maximum vocabulary size
+                max_vocab_size=0,         # Maximum vocabulary size
                 min_count=5,              # Minimum word count to be considered as a vocabulary word
                 sample=1e-3,              # Sub-sampling rate
                 sorted_vocab=True,        # Sort the vocabulary in descending order of word count
