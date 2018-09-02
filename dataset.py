@@ -16,10 +16,11 @@ class Word2VecDataset(object):
                arch='skip_gram',
                algm='negative_sampling',
                batch_size=32,
-               max_vocab_size=17000,
+               max_vocab_size=0,
                min_count=10,
                sample=1e-3,
-               window_size=2):
+               window_size=5,
+               shuffle_buffer_size=None):
     """Constructor.
 
     Args:
@@ -27,14 +28,16 @@ class Word2VecDataset(object):
       algm: string scalar: training algorithm ('negative_sampling' or
         'hierarchical_softmax').
       batch_size: int scalar, the returned tensors in `get_tensor_dict` have
-         shapes [batch_size, :]. 
-      max_vocab_size: int scalar or None, maximum vocabulary size. If not None,
-        the top `max_vocab_size` most frequent words are kept in vocabulary.
+        shapes [batch_size, :]. 
+      max_vocab_size: int scalar, maximum vocabulary size. If > 0, the top 
+        `max_vocab_size` most frequent words are kept in vocabulary.
       min_count: int scalar, words whose counts < `min_count` are not included
         in the vocabulary.
       sample: float scalar, subsampling rate.
       window_size: int scalar, num of words on the left or right side of
         target word within a window.
+      shuffle_buffer_size: None or int scalar, buffer size for shuffling 
+        operation. If None, no shuffling is performed.
     """
     self._arch = arch
     self._algm = algm
@@ -43,6 +46,7 @@ class Word2VecDataset(object):
     self._min_count = min_count
     self._sample = sample
     self._window_size = window_size
+    self._shuffle_buffer_size = shuffle_buffer_size
 
     self._iterator_initializer = None
     self._table_words = None
@@ -78,7 +82,7 @@ class Word2VecDataset(object):
     for line in lines:
       raw_vocab.update(line.strip().split())
     raw_vocab = raw_vocab.most_common()
-    if self._max_vocab_size is not None and self._max_vocab_size > 0:
+    if self._max_vocab_size > 0:
       raw_vocab = raw_vocab[:self._max_vocab_size]
     return raw_vocab
 
@@ -90,7 +94,7 @@ class Word2VecDataset(object):
         of each entry is the same as the word index into the vocabulary.
     - unigram_counts: list of int, holding word counts. Index of each entry
         is the same as the word index into the vocabulary.
-    - keep_probs: list of float, holding words' keep_prob for subsampling. 
+    - keep_probs: list of float, holding words' keep prob for subsampling. 
         Index of each entry is the same as the word index into the vocabulary.
     - corpus_size: int scalar, effective corpus size.
 
@@ -106,7 +110,7 @@ class Word2VecDataset(object):
     self._keep_probs = []
     for word, count in raw_vocab:
       frac = count / float(self._corpus_size)
-      keep_prob = (np.sqrt(frac / self._sample) + 1) * self._sample / frac
+      keep_prob = (np.sqrt(frac / self._sample) + 1) * (self._sample / frac)
       keep_prob = np.minimum(keep_prob, 1.0)
       self._table_words.append(word)
       self._unigram_counts.append(count)
@@ -227,14 +231,15 @@ class Word2VecDataset(object):
 
     dataset = tf.data.TextLineDataset(filenames)
     dataset = dataset.repeat()
+    if self._shuffle_buffer_size:
+      dataset = dataset.shuffle(self._shuffle_buffer_size)
     dataset = dataset.map(lambda sent: _get_word_indices(sent, table_words))
     dataset = dataset.map(lambda indices: _subsample(indices, keep_probs))
     dataset = dataset.filter(lambda indices: tf.greater(tf.size(indices), 1))
     dataset = dataset.map(lambda indices: _generate_instances(
         indices, self._arch, self._window_size, codes_points))
     dataset = dataset.flat_map(tf.data.Dataset.from_tensor_slices)
-    dataset = dataset.apply(tf.contrib.data.batch_and_drop_remainder(
-        self._batch_size))
+    dataset = dataset.batch(self._batch_size)
 
     iterator = dataset.make_initializable_iterator()
     self._iterator_initializer = iterator.initializer
@@ -248,7 +253,7 @@ class Word2VecDataset(object):
     return {'inputs': inputs, 'labels': labels}
 
   def estimate_num_steps(self, num_epochs, factor=0.6):
-    """Computes estimated num of steps to be performed by word2vec model.
+    """Computes estimated num of steps to be performed by Word2Vec model.
 
     Args:
       num_epochs: int scalar, num of times the corpus of sentences are iterated.
@@ -262,7 +267,6 @@ class Word2VecDataset(object):
     num_steps = self._corpus_size * num_epochs // self._batch_size
     if self._arch == 'skip_gram':
       num_steps *= self._window_size
-    
     return int(num_steps * factor)
 
 
@@ -284,11 +288,11 @@ def _get_word_indices(sent, table_words):
 
 def _subsample(indices, keep_probs):
   """Filters out-of-vocabulary words and then applies subsampling on words in a 
-  sentence. Words with high frequencies are more likely to be dropped. 
+  sentence. Words with high frequencies have lower keep probs.
 
   Args:
     indices: rank-1 int tensor, the word indices within a sentence.
-    keep_probs: rank-1 float tensor, holding words' keep_prob for subsampling.
+    keep_probs: rank-1 float tensor, the prob to drop the word. 
 
   Returns:
     indices: rank-1 int tensor, the word indices within a sentence after 
@@ -296,13 +300,13 @@ def _subsample(indices, keep_probs):
   """
   indices = tf.boolean_mask(indices, tf.not_equal(indices, OOV_ID))
   keep_probs = tf.gather(keep_probs, indices)
-  selectors = tf.random_uniform(shape=tf.shape(keep_probs))
-  indices = tf.boolean_mask(indices, tf.less(selectors, keep_probs))
+  randvars = tf.random_uniform(tf.shape(keep_probs), 0, 1)
+  indices = tf.boolean_mask(indices, tf.less(randvars, keep_probs))
   return indices
 
 
 def _generate_instances(indices, arch, window_size, codes_points=None):
-  """Generates matrices holding word indices to be passed to word2vec models.
+  """Generates matrices holding word indices to be passed to Word2Vec models.
   The shape and contents of output matrices depends on the architecture (
   'skip_gram', 'cbow') and training algorithm ('negative_sampling', 
   'hierarchical_softmax').
@@ -370,8 +374,7 @@ def _generate_instances(indices, arch, window_size, codes_points=None):
   _, result_array = tf.while_loop(lambda i, ta: i < size,
                                   per_target_fn, 
                                   [0, init_array],
-                                      back_prop=False,
-                                      parallel_iterations=1024)
+                                      back_prop=False)
   instances = tf.to_int64(result_array.concat())
   return instances
 

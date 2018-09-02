@@ -41,6 +41,10 @@ class Word2VecModel(object):
 
     self._syn0 = None
 
+  @property
+  def syn0(self):
+    return self._syn0
+
   def _build_loss(self, dataset, filenames, scope=None):
     """Builds the graph that leads from data tensors (`inputs`, `labels`)
     to loss. Has the side effect of setting attribute `syn0`.
@@ -56,7 +60,7 @@ class Word2VecModel(object):
     tensor_dict = dataset.get_tensor_dict(filenames)
     inputs, labels = tensor_dict['inputs'], tensor_dict['labels']
 
-    syn0, syn1, biases = self._create_embeddings(dataset.table_words)
+    syn0, syn1, biases = self._create_embeddings(len(dataset.unigram_counts))
     self._syn0 = syn0
     with tf.variable_scope(scope, 'Loss', [inputs, labels, syn0, syn1, biases]):
       if self._algm == 'negative_sampling':
@@ -94,12 +98,11 @@ class Word2VecModel(object):
                       'learning_rate': learning_rate}
     return to_be_run_dict
 
-  def _create_embeddings(self, table_words, scope=None):
+  def _create_embeddings(self, vocab_size, scope=None):
     """Creates initial word embedding variables.
 
     Args:
-      table_words: list of string, holding the list of vocabulary words. Index
-        of each entry is the same as the word index into the vocabulary.
+      vocab_size: int scalar, num of words in vocabulary.
       scope: string scalar, scope name.
 
     Returns:
@@ -109,20 +112,14 @@ class Word2VecModel(object):
         embeddings (i.e. weights of output layer).
       biases: float tensor of shape [syn1_rows], biases added onto the logits.
     """
-    if self._algm == 'negative_sampling':
-      syn1_rows = len(table_words) 
-    else:
-      syn1_rows = len(table_words) - 1
-    syn0_init_val = get_syn0_init_val(table_words,
-                                      self._embed_size,
-                                      self._random_seed)
+    syn1_rows = (vocab_size if self._algm == 'negative_sampling' 
+                            else vocab_size - 1)
     with tf.variable_scope(scope, 'Embedding'):
-      syn0 = tf.get_variable('syn0', initializer=syn0_init_val, 
-          dtype=tf.float32)
+      syn0 = tf.get_variable('syn0', initializer=tf.random_uniform([vocab_size, 
+          self._embed_size], -0.5, 0.5, seed=self._random_seed))
       syn1 = tf.get_variable('syn1', initializer=tf.random_uniform([syn1_rows,
-          self._embed_size], -0.1, 0.1), dtype=tf.float32)
-      biases = tf.get_variable('biases', initializer=tf.zeros([syn1_rows]),
-          dtype=tf.float32)
+          self._embed_size], -0.1, 0.1, seed=self._random_seed))
+      biases = tf.get_variable('biases', initializer=tf.zeros([syn1_rows]))
     return syn0, syn1, biases
 
   def _negative_sampling_loss(
@@ -235,18 +232,8 @@ class Word2VecModel(object):
     return inputs_syn0
 
 
-def seeded_vector(embed_size, seed_string):
-  random = np.random.RandomState(hash(seed_string) & 0xffffffff)
-  return (random.rand(embed_size) - 0.5) / embed_size
-
-
-def get_syn0_init_val(table_words, embed_size, random_seed):
-  return np.vstack([seeded_vector(embed_size, w + str(random_seed))
-    for w in table_words]).astype(np.float32)
-
-
 class WordVectors(object):
-  """Word vectors of trained word2vec model. Provides APIs for retrieving
+  """Word vectors of trained Word2Vec model. Provides APIs for retrieving
   word vector, and most similar words given a query word.
   """
   def __init__(self, syn0_final, vocab):
