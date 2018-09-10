@@ -21,6 +21,7 @@ flags = tf.app.flags
 flags.DEFINE_string('arch', 'skip_gram', 'Architecture (skip_gram or cbow).')
 flags.DEFINE_string('algm', 'negative_sampling', 'Training algorithm '
     '(negative_sampling or hierarchical_softmax).')
+flags.DEFINE_integer('epochs', 1, 'Num of epochs to iterate training data.')
 flags.DEFINE_integer('batch_size', 256, 'Batch size.')
 flags.DEFINE_integer('max_vocab_size', 0, 'Maximum vocabulary size. If > 0, '
     'the top `max_vocab_size` most frequent words are kept in vocabulary.')
@@ -38,35 +39,24 @@ flags.DEFINE_float('min_alpha', 0.0001, 'Final learning rate.')
 flags.DEFINE_boolean('add_bias', True, 'Whether to add bias term to dotproduct '
     'between syn0 and syn1 vectors.')
 
-flags.DEFINE_integer('num_epochs', 1, 'Num of epochs to iterate training data.')
-flags.DEFINE_integer('num_steps', 0, '(Optional) Num of steps to train model '
-    'for. Defaults to 0. If > 0, use `num_epochs` to compute an estimated num '
-    'of steps.')
 flags.DEFINE_integer('log_per_steps', 10000, 'Every `log_per_steps` steps to '
     ' output logs.')
-flags.DEFINE_list('filenames', [], 'Names of comma-separated input text files.')
-flags.DEFINE_string('out_dir', '', 'Output directory.')
+flags.DEFINE_list('filenames', None, 'Names of comma-separated input text files.')
+flags.DEFINE_string('out_dir', None, 'Output directory.')
 
 FLAGS = flags.FLAGS
 
 
 def main(_):
-  assert FLAGS.filenames, '`filenames` is missing.'
-  assert FLAGS.out_dir, '`out_dir` is missing.'
   dataset = Word2VecDataset(arch=FLAGS.arch,
                             algm=FLAGS.algm,
+                            epochs=FLAGS.epochs,
                             batch_size=FLAGS.batch_size,
                             max_vocab_size=FLAGS.max_vocab_size,
                             min_count=FLAGS.min_count,
                             sample=FLAGS.sample,
-                            window_size=FLAGS.window_size,
-                            shuffle_buffer_size=None)
+                            window_size=FLAGS.window_size)
   dataset.build_vocab(FLAGS.filenames)
-
-  num_steps = FLAGS.num_steps
-  if num_steps <= 0:
-    num_steps = dataset.estimate_num_steps(FLAGS.num_epochs)
-    print('Use estimated num steps computed from `num_epochs`:', num_steps)
 
   word2vec = Word2VecModel(arch=FLAGS.arch,
                            algm=FLAGS.algm,
@@ -76,7 +66,6 @@ def main(_):
                            power=FLAGS.power,
                            alpha=FLAGS.alpha,
                            min_alpha=FLAGS.min_alpha,
-                           num_steps=num_steps,
                            add_bias=FLAGS.add_bias,
                            random_seed=0)
 
@@ -89,8 +78,12 @@ def main(_):
 
     average_loss = 0.
 
-    for step in range(num_steps):
-      result_dict = sess.run(to_be_run_dict)
+    step = 0
+    while True:
+      try: 
+        result_dict = sess.run(to_be_run_dict)
+      except tf.errors.OutOfRangeError:
+        break
       average_loss += result_dict['loss'].mean()
       if step % FLAGS.log_per_steps == 0:
         if step > 0:
@@ -98,6 +91,7 @@ def main(_):
         print('step:', step, 'average_loss:', average_loss, 
             'learning_rate:', result_dict['learning_rate'])
         average_loss = 0.
+      step += 1
 
     syn0_final = sess.run(word2vec.syn0)
 
@@ -109,4 +103,7 @@ def main(_):
   print('Vocabulary saved to', os.path.join(FLAGS.out_dir, 'vocab.txt'))
 
 if __name__ == '__main__':
+  tf.flags.mark_flag_as_required('filenames')
+  tf.flags.mark_flag_as_required('out_dir')
+
   tf.app.run()

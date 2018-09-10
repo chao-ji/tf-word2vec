@@ -15,18 +15,19 @@ class Word2VecDataset(object):
   def __init__(self,
                arch='skip_gram',
                algm='negative_sampling',
+               epochs=1,
                batch_size=32,
                max_vocab_size=0,
                min_count=10,
                sample=1e-3,
-               window_size=5,
-               shuffle_buffer_size=None):
+               window_size=5):
     """Constructor.
 
     Args:
       arch: string scalar, architecture ('skip_gram' or 'cbow').
       algm: string scalar: training algorithm ('negative_sampling' or
         'hierarchical_softmax').
+      epochs: int scalar, num times the dataset is iterated.
       batch_size: int scalar, the returned tensors in `get_tensor_dict` have
         shapes [batch_size, :]. 
       max_vocab_size: int scalar, maximum vocabulary size. If > 0, the top 
@@ -36,17 +37,15 @@ class Word2VecDataset(object):
       sample: float scalar, subsampling rate.
       window_size: int scalar, num of words on the left or right side of
         target word within a window.
-      shuffle_buffer_size: None or int scalar, buffer size for shuffling 
-        operation. If None, no shuffling is performed.
     """
     self._arch = arch
     self._algm = algm
+    self._epochs = epochs
     self._batch_size = batch_size
     self._max_vocab_size = max_vocab_size
     self._min_count = min_count
     self._sample = sample
     self._window_size = window_size
-    self._shuffle_buffer_size = shuffle_buffer_size
 
     self._iterator_initializer = None
     self._table_words = None
@@ -199,17 +198,15 @@ class Word2VecDataset(object):
     Returns:
       tensor_dict: a dict mapping from tensor names to tensors with shape being:
         when arch=='skip_gram', algm=='negative_sampling'
-          inputs: [N]
-          labels: [N]
+          inputs: [N],                    labels: [N]
         when arch=='cbow', algm=='negative_sampling'
-          inputs: [N, 2*window_size+1]
-          labels: [N]
+          inputs: [N, 2*window_size+1],   labels: [N]
         when arch=='skip_gram', algm=='hierarchical_softmax'
-          inputs: [N]
-          labels: [N, 2*max_depth+1]
+          inputs: [N],                    labels: [N, 2*max_depth+1]
         when arch=='cbow', algm=='hierarchical_softmax'
-          inputs: [N, 2*window_size+1]
-          labels: [N, 2*max_depth+1]
+          inputs: [N, 2*window_size+1],   labels: [N, 2*max_depth+1]
+        progress: [N], the percentage of sentences covered so far. Used to 
+          compute learning rate.
     """
     table_words = self._table_words
     unigram_counts = self._unigram_counts
@@ -229,48 +226,43 @@ class Word2VecDataset(object):
         tf.constant(table_words), default_value=OOV_ID)
     keep_probs = tf.constant(keep_probs)
 
-    dataset = tf.data.TextLineDataset(filenames)
-    dataset = dataset.repeat()
-    if self._shuffle_buffer_size:
-      dataset = dataset.shuffle(self._shuffle_buffer_size)
-    dataset = dataset.map(lambda sent: _get_word_indices(sent, table_words))
-    dataset = dataset.map(lambda indices: _subsample(indices, keep_probs))
-    dataset = dataset.filter(lambda indices: tf.greater(tf.size(indices), 1))
-    dataset = dataset.map(lambda indices: _generate_instances(
-        indices, self._arch, self._window_size, codes_points))
-    dataset = dataset.flat_map(tf.data.Dataset.from_tensor_slices)
-    dataset = dataset.batch(self._batch_size)
+    num_sents = sum([len(list(open(fn))) for fn in filenames]) * self._epochs
+
+    dataset = tf.data.Dataset.zip((
+        tf.data.TextLineDataset(filenames).repeat(self._epochs), 
+        tf.data.Dataset.from_tensor_slices(tf.range(num_sents) / num_sents)))
+
+    dataset = dataset.map(lambda sent, progress: 
+        (get_word_indices(sent, table_words), progress))
+    dataset = dataset.map(lambda indices, progress: 
+        (subsample(indices, keep_probs), progress))
+    dataset = dataset.filter(lambda indices, progress: 
+        tf.greater(tf.size(indices), 1))
+
+    dataset = dataset.map(lambda indices, progress: (generate_instances(
+        indices, self._arch, self._window_size, codes_points), progress))
+    dataset = dataset.map(lambda instances, progress: (
+        instances, tf.fill(tf.shape(instances)[:1], progress)))
+
+    dataset = dataset.flat_map(lambda instances, progress: 
+        tf.data.Dataset.from_tensor_slices((instances, progress)))
+    dataset = dataset.apply(
+        tf.contrib.data.batch_and_drop_remainder(self._batch_size))
 
     iterator = dataset.make_initializable_iterator()
     self._iterator_initializer = iterator.initializer
-    tensor = iterator.get_next()
+    tensor, progress = iterator.get_next()
+    progress.set_shape([self._batch_size])
 
     inputs, labels = self._prepare_inputs_labels(tensor)
     if self._arch == 'skip_gram':
       inputs = tf.squeeze(inputs, axis=1)
     if self._algm == 'negative_sampling':
       labels = tf.squeeze(labels, axis=1)
-    return {'inputs': inputs, 'labels': labels}
-
-  def estimate_num_steps(self, num_epochs, factor=0.6):
-    """Computes estimated num of steps to be performed by Word2Vec model.
-
-    Args:
-      num_epochs: int scalar, num of times the corpus of sentences are iterated.
-      factor: float scalar, scaling factor.
-
-    Returns:
-      num_steps: int scalar, estimated num of steps to be performed by model.
-    """
-    if not self._corpus_size:
-      raise ValueError('`corpus_size` must be set by calling `build_vocab()`.')
-    num_steps = self._corpus_size * num_epochs // self._batch_size
-    if self._arch == 'skip_gram':
-      num_steps *= self._window_size
-    return int(num_steps * factor)
+    return {'inputs': inputs, 'labels': labels, 'progress': progress}
 
 
-def _get_word_indices(sent, table_words):
+def get_word_indices(sent, table_words):
   """Converts a sentence into a list of word indices.
 
   Args:
@@ -286,13 +278,13 @@ def _get_word_indices(sent, table_words):
   return indices
 
 
-def _subsample(indices, keep_probs):
+def subsample(indices, keep_probs):
   """Filters out-of-vocabulary words and then applies subsampling on words in a 
   sentence. Words with high frequencies have lower keep probs.
 
   Args:
     indices: rank-1 int tensor, the word indices within a sentence.
-    keep_probs: rank-1 float tensor, the prob to drop the word. 
+    keep_probs: rank-1 float tensor, the prob to drop the each vocabulary word. 
 
   Returns:
     indices: rank-1 int tensor, the word indices within a sentence after 
@@ -305,11 +297,11 @@ def _subsample(indices, keep_probs):
   return indices
 
 
-def _generate_instances(indices, arch, window_size, codes_points=None):
-  """Generates matrices holding word indices to be passed to Word2Vec models.
-  The shape and contents of output matrices depends on the architecture (
-  'skip_gram', 'cbow') and training algorithm ('negative_sampling', 
-  'hierarchical_softmax').
+def generate_instances(indices, arch, window_size, codes_points=None):
+  """Generates matrices holding word indices to be passed to Word2Vec models 
+  for each sentence. The shape and contents of output matrices depends on the 
+  architecture ('skip_gram', 'cbow') and training algorithm ('negative_sampling'
+  , 'hierarchical_softmax').
 
   It takes as input a list of word indices in a subsampled-sentence, where each
   word is a target word, and their context words are those within the window 

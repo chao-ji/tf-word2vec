@@ -12,8 +12,6 @@ Your data should be a number of text files where each line contains a sentence, 
 
 3. Parameter settings.
 This implementation allows you to train the model under *skip gram* or *continuous bag-of-words* architectures (`--arch`), and perform training using *negative sampling* or *hierarchical softmax.* (`--algm`). 
-
-You also need to provide the number of steps to train the model for (`--num_steps=`). This should approximately match with the number of epochs you wish the dataset will be iterated over, because it is used to linearly decay the learning rate. If the number of steps is not provided, an estimated value is computed based on the corpus size, batch size and the number of epochs. 
  
 4. Run.
 Example:
@@ -21,6 +19,7 @@ Example:
   python run_training.py \
     --filenames=/PATH/TO/FILE/file1.txt,/PATH/TO/FILE/file2.txt
     --out_dir=/PATH/TO/OUT_DIR/
+    --epochs=5
     --batch_size=64
     --window_size=5
 ```
@@ -31,7 +30,7 @@ The vocabulary words and word embeddings will be saved to `vocab.txt` and `embed
 The model was trained on the IMDB movie review dataset using the following parameters:
 
 ```
---arch=skip_gram --algm=negative_sampling --batch_size=256 --max_vocab_size=0 --min_count=10 --sample=1e-3 --window_size=10 --embed_size=300 --negatives=5 --power=0.75 --alpha=0.025 --min_alpha=0.0001 --num_epochs=5
+--arch=skip_gram --algm=negative_sampling --batch_size=256 --max_vocab_size=0 --min_count=10 --sample=1e-3 --window_size=10 --embed_size=300 --negatives=5 --power=0.75 --alpha=0.025 --min_alpha=0.0001 --epochs=5
 ```
 
 Below are a sample list of queries with their most similar words.

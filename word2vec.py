@@ -9,7 +9,7 @@ class Word2VecModel(object):
   """
 
   def __init__(self, arch, algm, embed_size, batch_size, negatives, power,
-               alpha, min_alpha, num_steps, add_bias, random_seed):
+               alpha, min_alpha, add_bias, random_seed):
     """Constructor.
 
     Args:
@@ -22,7 +22,6 @@ class Word2VecModel(object):
       power: float scalar, distortion for negative sampling. 
       alpha: float scalar, initial learning rate.
       min_alpha: float scalar, final learning rate.
-      num_steps: int scalar, num of steps to train model for.
       add_bias: bool scalar, whether to add bias term to dotproduct 
         between syn0 and syn1 vectors.
       random_seed: int scalar, random_seed.
@@ -35,7 +34,6 @@ class Word2VecModel(object):
     self._power = power
     self._alpha = alpha
     self._min_alpha = min_alpha
-    self._num_steps = num_steps
     self._add_bias = add_bias
     self._random_seed = random_seed
 
@@ -45,27 +43,28 @@ class Word2VecModel(object):
   def syn0(self):
     return self._syn0
 
-  def _build_loss(self, dataset, filenames, scope=None):
+  def _build_loss(self, inputs, labels, unigram_counts, scope=None):
     """Builds the graph that leads from data tensors (`inputs`, `labels`)
     to loss. Has the side effect of setting attribute `syn0`.
 
     Args:
-      dataset: a `Word2VecDataset` instance.
-      filenames: a list of strings, holding names of text files.
+      inputs: int tensor of shape [batch_size] (skip_gram) or 
+        [batch_size, 2*window_size+1] (cbow) 
+      labels: int tensor of shape [batch_size] (negative_sampling) or
+        [batch_size, 2*max_depth+1] (hierarchical_softmax)
+      unigram_count: list of int, holding word counts. Index of each entry
+        is the same as the word index into the vocabulary.
       scope: string scalar, scope name.
 
     Returns:
       loss: float tensor, cross entropy loss. 
     """
-    tensor_dict = dataset.get_tensor_dict(filenames)
-    inputs, labels = tensor_dict['inputs'], tensor_dict['labels']
-
-    syn0, syn1, biases = self._create_embeddings(len(dataset.unigram_counts))
+    syn0, syn1, biases = self._create_embeddings(len(unigram_counts))
     self._syn0 = syn0
     with tf.variable_scope(scope, 'Loss', [inputs, labels, syn0, syn1, biases]):
       if self._algm == 'negative_sampling':
         loss = self._negative_sampling_loss(
-            dataset.unigram_counts, inputs, labels, syn0, syn1, biases)
+            unigram_counts, inputs, labels, syn0, syn1, biases)
       elif self._algm == 'hierarchical_softmax':
         loss = self._hierarchical_softmax_loss(
             inputs, labels, syn0, syn1, biases)
@@ -85,12 +84,14 @@ class Word2VecModel(object):
           'loss': cross entropy loss,
           'learning_rate': float-scalar learning rate}
     """
-    loss = self._build_loss(dataset, filenames)
+    tensor_dict = dataset.get_tensor_dict(filenames)
+    inputs, labels = tensor_dict['inputs'], tensor_dict['labels']
+
+    loss = self._build_loss(inputs, labels, dataset.unigram_counts)
     global_step = tf.train.get_or_create_global_step()
-    progress = tf.to_float(global_step) / float(self._num_steps)
-    learning_rate = tf.maximum(
-        self._alpha * (1 - progress) + self._min_alpha * progress,
-        self._min_alpha)
+
+    learning_rate = tf.maximum(self._alpha * (1 - tensor_dict['progress'][0]) +
+         self._min_alpha * tensor_dict['progress'][0], self._min_alpha)
     optimizer = tf.train.GradientDescentOptimizer(learning_rate)
     grad_update_op = optimizer.minimize(loss, global_step=global_step)
     to_be_run_dict = {'grad_update_op': grad_update_op, 
