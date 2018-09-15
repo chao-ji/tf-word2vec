@@ -2,10 +2,10 @@ r"""Executable for training Word2Vec models.
 
 Example:
   python run_training.py \
-    --filenames=/PATH/TO/FILE/file1.txt,/PATH/TO/FILE/file2.txt
-    --out_dir=/PATH/TO/OUT_DIR/
-    --batch_size=64
-    --window_size=5
+    --filenames=/PATH/TO/FILE/file1.txt,/PATH/TO/FILE/file2.txt \
+    --out_dir=/PATH/TO/OUT_DIR/ \
+    --batch_size=64 \
+    --window_size=5 \
 
 Learned word embeddings will be saved to /PATH/TO/OUT_DIR/embed.npy, and
 vocabulary saved to /PATH/TO/OUT_DIR/vocab.txt
