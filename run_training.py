@@ -1,4 +1,4 @@
-r"""Executable for training Word2Vec models 
+r"""Executable for training Word2Vec models. 
 
 Example:
   python run_training.py \
@@ -6,6 +6,9 @@ Example:
     --out_dir=/PATH/TO/OUT_DIR/
     --batch_size=64
     --window_size=5
+
+Learned word embeddings will be saved to /PATH/TO/OUT_DIR/embed.npy, and
+vocabulary saved to /PATH/TO/OUT_DIR/vocab.txt
 """
 import os
 from datetime import datetime
@@ -42,7 +45,7 @@ flags.DEFINE_boolean('add_bias', True, 'Whether to add bias term to dotproduct '
 flags.DEFINE_integer('log_per_steps', 10000, 'Every `log_per_steps` steps to '
     ' output logs.')
 flags.DEFINE_list('filenames', None, 'Names of comma-separated input text files.')
-flags.DEFINE_string('out_dir', None, 'Output directory.')
+flags.DEFINE_string('out_dir', '/tmp/word2vec', 'Output directory.')
 
 FLAGS = flags.FLAGS
 
@@ -104,6 +107,5 @@ def main(_):
 
 if __name__ == '__main__':
   tf.flags.mark_flag_as_required('filenames')
-  tf.flags.mark_flag_as_required('out_dir')
 
   tf.app.run()

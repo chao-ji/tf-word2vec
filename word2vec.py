@@ -117,9 +117,10 @@ class Word2VecModel(object):
                             else vocab_size - 1)
     with tf.variable_scope(scope, 'Embedding'):
       syn0 = tf.get_variable('syn0', initializer=tf.random_uniform([vocab_size, 
-          self._embed_size], -0.5, 0.5, seed=self._random_seed))
+          self._embed_size], -0.5/self._embed_size, 0.5/self._embed_size, 
+          seed=self._random_seed))
       syn1 = tf.get_variable('syn1', initializer=tf.random_uniform([syn1_rows,
-          self._embed_size], -0.1, 0.1, seed=self._random_seed))
+          self._embed_size], -0.1, 0.1))
       biases = tf.get_variable('biases', initializer=tf.zeros([syn1_rows]))
     return syn0, syn1, biases
 
