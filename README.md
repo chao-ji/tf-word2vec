@@ -11,7 +11,7 @@ git git@github.com:chao-ji/tf-word2vec.git
 Your data should be a number of text files where each line contains a sentence, and words are delimited by space.
 
 3. Parameter settings.
-This implementation allows you to train the model under *skip gram* or *continuous bag-of-words* architectures (`--arch`), and perform training using *negative sampling* or *hierarchical softmax.* (`--algm`). 
+This implementation allows you to train the model under *skip gram* or *continuous bag-of-words* architectures (`--arch`), and perform training using *negative sampling* or *hierarchical softmax.* (`--algm`). To see a full list of parameters, run`python run_training.py --help`. 
  
 4. Run.
 Example:
