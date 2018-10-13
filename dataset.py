@@ -246,8 +246,7 @@ class Word2VecDataset(object):
 
     dataset = dataset.flat_map(lambda instances, progress: 
         tf.data.Dataset.from_tensor_slices((instances, progress)))
-    dataset = dataset.apply(
-        tf.contrib.data.batch_and_drop_remainder(self._batch_size))
+    dataset = dataset.batch(self._batch_size, drop_remainder=True)
 
     iterator = dataset.make_initializable_iterator()
     self._iterator_initializer = iterator.initializer
