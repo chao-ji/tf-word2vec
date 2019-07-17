@@ -99,7 +99,7 @@ def main(_):
     syn0_final = sess.run(word2vec.syn0)
 
   np.save(os.path.join(FLAGS.out_dir, 'embed'), syn0_final)
-  with open(os.path.join(FLAGS.out_dir, 'vocab.txt'), 'w') as fid:
+  with open(os.path.join(FLAGS.out_dir, 'vocab.txt'), 'w', encoding="utf-8") as fid:
     for w in dataset.table_words:
       fid.write(w + '\n')
   print('Word embeddings saved to', os.path.join(FLAGS.out_dir, 'embed.npy'))

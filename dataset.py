@@ -5,6 +5,8 @@ import collections
 import numpy as np
 import tensorflow as tf
 
+from functools import partial
+
 OOV_ID = -1
 
 
@@ -76,7 +78,8 @@ class Word2VecDataset(object):
       raw_vocab: a list of 2-tuples holding the word (string) and count (int),
         sorted in descending order of word count. 
     """
-    lines = itertools.chain(*map(open, filenames))
+    map_open = partial(open, encoding="utf-8")
+    lines = itertools.chain(*map(map_open, filenames))
     raw_vocab = collections.Counter()
     for line in lines:
       raw_vocab.update(line.strip().split())
