@@ -1,5 +1,7 @@
 # Word2Vec: Learning distributed word representation from unlabeled text.
 
+**Update**: [TensorFlow 2.x implementation](tf2.x)
+
 Word2Vec is a classic model for learning distributed word representation from large unlabeled dataset. There have been many implementations out there since its introduction (e.g. the original C implementation, and the gensim implementation). This is an attempt to reimplement word2vec in TensorFlow using the `tf.data.Dataset` APIs, a recommended way to streamline data preprocessing for TensorFlow models. 
 
 ### Usage
