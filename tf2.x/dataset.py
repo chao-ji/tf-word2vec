@@ -51,7 +51,6 @@ class WordTokenizer(object):
       raw_vocab: a list of 2-tuples holding the word (string) and count (int),
         sorted in descending order of word count. 
     """
-    #lines = itertools.chain(*[tf.io.gfile.GFile(fn) for fn in filenames])
     lines = []
     for fn in filenames:
       with tf.io.gfile.GFile(fn) as f:
@@ -157,8 +156,6 @@ class Word2VecDatasetBuilder(object):
         of each vocabulary word. The last entry is the true length of code
         and point (<= `max_depth`).
     """
-    print('\n\n\n\n\n\n\n\n\n\n\n\nbuild_binary_tree\n\n\n\n\n\n')
-
     vocab_size = len(unigram_counts)
     heap = [[unigram_counts[i], i] for i in range(vocab_size)]
     heapq.heapify(heap)

@@ -84,17 +84,6 @@ def main(_):
 
   dataset = builder.build_dataset(filenames)
 
-  #print('batch_size', batch_size)
-  #print('window_size', window_size)
-  #print('max_depth', builder._max_depth)
-
-
-  #it = iter(dataset)
-  #for i in range(10):
-  #  a, b, c = next(it)
-  #  print('inputs', a.shape, a.dtype, 'labels', b.shape, b.dtype, 'progress', c.shape, c.dtype)
-  
-
   word2vec = Word2VecModel(tokenizer.unigram_counts,
                arch=arch,
                algm=algm,
