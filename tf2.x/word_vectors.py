@@ -1,6 +1,7 @@
 """Defines wrapper class for final word vectors.
 """
 import heapq
+import numpy as np
 
 
 class WordVectors(object):
@@ -13,7 +14,7 @@ class WordVectors(object):
     Args:
       syn0_final: numpy array of shape [vocab_size, embed_size], final word
         embeddings.
-      vocab_words: a list of strings, holding vocabulary words.
+      vocab: a list of strings, holding vocabulary words.
     """
     self._syn0_final = syn0_final
     self._vocab = vocab

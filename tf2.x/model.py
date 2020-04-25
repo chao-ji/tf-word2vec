@@ -98,7 +98,6 @@ class Word2VecModel(tf.keras.Model):
     Returns:
       loss: float tensor of shape [batch_size, sample_size + 1].
     """
-
     syn0, syn1, biases = self.weights
 
     sampled_values = tf.random.fixed_unigram_candidate_sampler(
@@ -116,7 +115,6 @@ class Word2VecModel(tf.keras.Model):
     true_syn1 = tf.gather(syn1, labels) # [N, D]
     sampled_syn1 = tf.gather(syn1, sampled_mat) # [N, K, D]
     true_logits = tf.reduce_sum(tf.multiply(inputs_syn0, true_syn1), 1) # [N]
-
     sampled_logits = tf.einsum('ijk,ikl->il', tf.expand_dims(inputs_syn0, 1), 
         tf.transpose(sampled_syn1, (0, 2, 1)))
 
@@ -144,11 +142,16 @@ class Word2VecModel(tf.keras.Model):
       loss: float tensor of shape [sum_of_code_len]
     """
     syn0, syn1, biases = self.weights
-    max_depth = (labels.shape.as_list()[1] - 1) // 2
 
-    def func(args):
-      inputs_syn0, codes_points = args
+    inputs_syn0_list = tf.unstack(self._get_inputs_syn0(inputs))
+    codes_points_list = tf.unstack(labels)
+    max_depth = (labels.shape.as_list()[1] - 1) // 2
+    loss = []
+    for i in range(self._batch_size):
+      inputs_syn0 = inputs_syn0_list[i]
+      codes_points = codes_points_list[i]
       true_size = codes_points[-1]
+
       codes = codes_points[:true_size]
       points = codes_points[max_depth:max_depth+true_size]
 
@@ -157,20 +160,9 @@ class Word2VecModel(tf.keras.Model):
       if self._add_bias:
         logits += tf.gather(biases, points)
 
-      losses = tf.nn.sigmoid_cross_entropy_with_logits(
-          labels=tf.cast(codes, 'float32'), logits=logits)
-      loss = tf.reduce_sum(losses)
-      count = tf.size(losses)
-
-      loss = tf.reshape(loss, (1,)) 
-      count = tf.reshape(count, (1,))
-      result = tf.concat([tf.cast(loss, 'float32'), tf.cast(count, 'float32')], axis=0)
-      return result
-
-    result = tf.map_fn(func, (self._get_inputs_syn0(inputs), labels), 'float32')
-    result = tf.reduce_sum(result, axis=0)
-    loss = result[0] / result[1]
-
+      loss.append(tf.nn.sigmoid_cross_entropy_with_logits(
+          labels=tf.cast(codes, 'float32'), logits=logits))
+    loss = tf.concat(loss, axis=0)
     return loss
 
   def _get_inputs_syn0(self, inputs):
@@ -188,13 +180,14 @@ class Word2VecModel(tf.keras.Model):
     if self._arch == 'skip_gram':
       inputs_syn0 = tf.gather(syn0, inputs)
     else:
-
-      def func(contexts):
+      inputs_syn0 = []
+      contexts_list = tf.unstack(inputs)
+      for i in range(self._batch_size):
+        contexts = contexts_list[i]
         context_words = contexts[:-1]
         true_size = contexts[-1]
-        result = tf.reduce_mean(tf.gather(syn0, context_words[:true_size]), axis=0)
-        return result
+        inputs_syn0.append(
+            tf.reduce_mean(tf.gather(syn0, context_words[:true_size]), axis=0))
+      inputs_syn0 = tf.stack(inputs_syn0)
 
-      inputs_syn0 = tf.map_fn(func, inputs, dtype='float32')
-      
     return inputs_syn0

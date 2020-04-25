@@ -34,7 +34,7 @@ flags.DEFINE_integer('max_vocab_size', 0, 'Maximum vocabulary size. If > 0, '
 flags.DEFINE_integer('min_count', 10, 'Words whose counts < `min_count` are not'
     ' included in the vocabulary.')
 flags.DEFINE_float('sample', 1e-3, 'Subsampling rate.')
-flags.DEFINE_integer('window_size', 10, 'Num of words on the left or right side' 
+flags.DEFINE_integer('window_size', 10, 'Num of words on the left or right side'
     ' of target word within a window.')
 
 flags.DEFINE_integer('hidden_size', 300, 'Length of word vector.')
@@ -47,7 +47,8 @@ flags.DEFINE_boolean('add_bias', True, 'Whether to add bias term to dotproduct '
 
 flags.DEFINE_integer('log_per_steps', 10000, 'Every `log_per_steps` steps to '
     ' output logs.')
-flags.DEFINE_list('filenames', None, 'Names of comma-separated input text files.')
+flags.DEFINE_list(
+    'filenames', None, 'Names of comma-separated input text files.')
 flags.DEFINE_string('out_dir', '/tmp/word2vec', 'Output directory.')
 
 FLAGS = flags.FLAGS
@@ -72,7 +73,8 @@ def main(_):
   filenames = FLAGS.filenames
   out_dir = FLAGS.out_dir
 
-  tokenizer = WordTokenizer(max_vocab_size=max_vocab_size, min_count=min_count, sample=sample)
+  tokenizer = WordTokenizer(
+      max_vocab_size=max_vocab_size, min_count=min_count, sample=sample)
   tokenizer.build_vocab(filenames)
 
   builder = Word2VecDatasetBuilder(tokenizer,
@@ -81,9 +83,7 @@ def main(_):
                                    epochs=epochs,
                                    batch_size=batch_size,
                                    window_size=window_size)
-
   dataset = builder.build_dataset(filenames)
-
   word2vec = Word2VecModel(tokenizer.unigram_counts,
                arch=arch,
                algm=algm,
@@ -95,18 +95,14 @@ def main(_):
                min_alpha=min_alpha,
                add_bias=add_bias)
 
-  train_step_signature = utils.get_train_step_signature(arch, algm, batch_size, window_size, builder._max_depth)
-
-
+  train_step_signature = utils.get_train_step_signature(
+      arch, algm, batch_size, window_size, builder._max_depth)
   optimizer = tf.keras.optimizers.SGD(1.0)
-
 
   @tf.function(input_signature=train_step_signature)
   def train_step(inputs, labels, progress):
-    with tf.GradientTape() as tape:
-      loss = word2vec(inputs, labels)
-
-    gradients = tape.gradient(loss, word2vec.trainable_variables)
+    loss = word2vec(inputs, labels)
+    gradients = tf.gradients(loss, word2vec.trainable_variables)
 
     learning_rate = tf.maximum(alpha * (1 - progress[0]) +
         min_alpha * progress[0], min_alpha)
@@ -125,7 +121,6 @@ def main(_):
       gradients[2]._values *= learning_rate
     else:
       gradients[2] *= learning_rate
-
 
     optimizer.apply_gradients(
         zip(gradients, word2vec.trainable_variables))
@@ -148,7 +143,8 @@ def main(_):
   with tf.io.gfile.GFile(os.path.join(FLAGS.out_dir, 'vocab.txt'), 'w') as f:
     for w in tokenizer.table_words:
       f.write(w + '\n')
-  print('Word embeddings saved to', os.path.join(FLAGS.out_dir, 'syn0_final.npy'))
+  print('Word embeddings saved to', 
+      os.path.join(FLAGS.out_dir, 'syn0_final.npy'))
   print('Vocabulary saved to', os.path.join(FLAGS.out_dir, 'vocab.txt'))
 
 
