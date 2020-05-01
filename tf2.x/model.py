@@ -98,7 +98,7 @@ class Word2VecModel(tf.keras.Model):
     Returns:
       loss: float tensor of shape [batch_size, sample_size + 1].
     """
-    syn0, syn1, biases = self.weights
+    _, syn1, biases = self.weights
 
     sampled_values = tf.random.fixed_unigram_candidate_sampler(
         true_classes=tf.expand_dims(labels, 1),
@@ -141,7 +141,7 @@ class Word2VecModel(tf.keras.Model):
     Returns:
       loss: float tensor of shape [sum_of_code_len]
     """
-    syn0, syn1, biases = self.weights
+    _, syn1, biases = self.weights
 
     inputs_syn0_list = tf.unstack(self._get_inputs_syn0(inputs))
     codes_points_list = tf.unstack(labels)

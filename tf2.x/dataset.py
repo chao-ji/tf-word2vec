@@ -70,6 +70,8 @@ class WordTokenizer(object):
 
     Has the side effect of setting the following attributes:   
     - vocab: dict, mapping token string to its index.
+    - table_words: list of string, holding the list of vocabulary words. Index
+        of each entry is the same as the word index into the vocabulary.
     - unigram_counts: list of int, holding word counts. Index of each entry
         is the same as the word index into the vocabulary.
     - keep_probs: list of float, holding words' keep prob for subsampling. 
