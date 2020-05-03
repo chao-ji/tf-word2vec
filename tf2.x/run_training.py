@@ -1,14 +1,15 @@
-"""Executable for training Word2Vec models. 
+"""Train a word2vec model to obtain word embedding vectors.
 
-Example:
-  python run_training.py \
-    --filenames=/PATH/TO/FILE/file1.txt,/PATH/TO/FILE/file2.txt \
-    --out_dir=/PATH/TO/OUT_DIR/ \
-    --batch_size=64 \
-    --window_size=5 \
+There are a total of four combination of architectures and training algorithms
+that the model can be trained with:
 
-Learned word embeddings will be saved to /PATH/TO/OUT_DIR/embed.npy, and
-vocabulary saved to /PATH/TO/OUT_DIR/vocab.txt
+architecture:
+  - skip_gram
+  - cbow (continuous bag-of-words)
+
+training algorithm
+  - negative_sampling
+  - hierarchical_softmax
 """
 import os
 
@@ -27,12 +28,12 @@ import utils
 flags.DEFINE_string('arch', 'skip_gram', 'Architecture (skip_gram or cbow).')
 flags.DEFINE_string('algm', 'negative_sampling', 'Training algorithm '
     '(negative_sampling or hierarchical_softmax).')
-flags.DEFINE_integer('epochs', 1, 'Num of epochs to iterate training data.')
+flags.DEFINE_integer('epochs', 1, 'Num of epochs to iterate thru corpus.')
 flags.DEFINE_integer('batch_size', 256, 'Batch size.')
 flags.DEFINE_integer('max_vocab_size', 0, 'Maximum vocabulary size. If > 0, '
-    'the top `max_vocab_size` most frequent words are kept in vocabulary.')
-flags.DEFINE_integer('min_count', 10, 'Words whose counts < `min_count` are not'
-    ' included in the vocabulary.')
+    'the top `max_vocab_size` most frequent words will be kept in vocabulary.')
+flags.DEFINE_integer('min_count', 10, 'Words whose counts < `min_count` will '
+    'not be included in the vocabulary.')
 flags.DEFINE_float('sample', 1e-3, 'Subsampling rate.')
 flags.DEFINE_integer('window_size', 10, 'Num of words on the left or right side'
     ' of target word within a window.')
@@ -46,7 +47,7 @@ flags.DEFINE_boolean('add_bias', True, 'Whether to add bias term to dotproduct '
     'between syn0 and syn1 vectors.')
 
 flags.DEFINE_integer('log_per_steps', 10000, 'Every `log_per_steps` steps to '
-    ' output logs.')
+    ' log the value of loss to be minimized.')
 flags.DEFINE_list(
     'filenames', None, 'Names of comma-separated input text files.')
 flags.DEFINE_string('out_dir', '/tmp/word2vec', 'Output directory.')
@@ -103,7 +104,7 @@ def main(_):
   def train_step(inputs, labels, progress):
     loss = word2vec(inputs, labels)
     gradients = tf.gradients(loss, word2vec.trainable_variables)
-
+  
     learning_rate = tf.maximum(alpha * (1 - progress[0]) +
         min_alpha * progress[0], min_alpha)
 

@@ -96,7 +96,7 @@ class Word2VecModel(tf.keras.Model):
       labels: int tensor of shape [batch_size]
 
     Returns:
-      loss: float tensor of shape [batch_size, sample_size + 1].
+      loss: float tensor of shape [batch_size, negatives + 1].
     """
     _, syn1, biases = self.weights
 
@@ -111,21 +111,29 @@ class Word2VecModel(tf.keras.Model):
 
     sampled = sampled_values.sampled_candidates
     sampled_mat = tf.reshape(sampled, [self._batch_size, self._negatives])
-    inputs_syn0 = self._get_inputs_syn0(inputs) # [N, D]
-    true_syn1 = tf.gather(syn1, labels) # [N, D]
-    sampled_syn1 = tf.gather(syn1, sampled_mat) # [N, K, D]
-    true_logits = tf.reduce_sum(tf.multiply(inputs_syn0, true_syn1), 1) # [N]
+    inputs_syn0 = self._get_inputs_syn0(inputs) # [batch_size, hidden_size]
+    true_syn1 = tf.gather(syn1, labels) # [batch_size, hidden_size]
+    # [batch_size, negatives, hidden_size]
+    sampled_syn1 = tf.gather(syn1, sampled_mat)
+    # [batch_size]
+    true_logits = tf.reduce_sum(tf.multiply(inputs_syn0, true_syn1), 1)
+    # [batch_size, negatives]
     sampled_logits = tf.einsum('ijk,ikl->il', tf.expand_dims(inputs_syn0, 1), 
         tf.transpose(sampled_syn1, (0, 2, 1)))
 
     if self._add_bias:
-      true_logits += tf.gather(biases, labels)  # [N]
-      sampled_logits += tf.gather(biases, sampled_mat)  # [N, K]
+      # [batch_size]
+      true_logits += tf.gather(biases, labels)
+      # [batch_size, negatives]
+      sampled_logits += tf.gather(biases, sampled_mat)
 
+    # [batch_size]
     true_cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(
         labels=tf.ones_like(true_logits), logits=true_logits)
+    # [batch_size, negatives]
     sampled_cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(
         labels=tf.zeros_like(sampled_logits), logits=sampled_logits)
+
     loss = tf.concat(
         [tf.expand_dims(true_cross_entropy, 1), sampled_cross_entropy], 1)
     return loss
@@ -148,18 +156,18 @@ class Word2VecModel(tf.keras.Model):
     max_depth = (labels.shape.as_list()[1] - 1) // 2
     loss = []
     for i in range(self._batch_size):
-      inputs_syn0 = inputs_syn0_list[i]
-      codes_points = codes_points_list[i]
+      inputs_syn0 = inputs_syn0_list[i] # [hidden_size]
+      codes_points = codes_points_list[i] # [2*max_depth+1]
       true_size = codes_points[-1]
 
       codes = codes_points[:true_size]
       points = codes_points[max_depth:max_depth+true_size]
-
       logits = tf.reduce_sum(
           tf.multiply(inputs_syn0, tf.gather(syn1, points)), 1)
       if self._add_bias:
         logits += tf.gather(biases, points)
 
+      # [true_size]
       loss.append(tf.nn.sigmoid_cross_entropy_with_logits(
           labels=tf.cast(codes, 'float32'), logits=logits))
     loss = tf.concat(loss, axis=0)
@@ -174,11 +182,12 @@ class Word2VecModel(tf.keras.Model):
         [batch_size, 2*window_size+1] (cbow)
 
     Returns:
-      inputs_syn0: [batch_size, embed_size]
+      inputs_syn0: [batch_size, hidden_size]
     """
+    # syn0: [vocab_size, hidden_size]
     syn0, _, _ = self.weights
     if self._arch == 'skip_gram':
-      inputs_syn0 = tf.gather(syn0, inputs)
+      inputs_syn0 = tf.gather(syn0, inputs) # [batch_size, hidden_size]
     else:
       inputs_syn0 = []
       contexts_list = tf.unstack(inputs)
