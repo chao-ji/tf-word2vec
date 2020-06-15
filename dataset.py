@@ -229,7 +229,7 @@ class Word2VecDataset(object):
         tf.constant(table_words), default_value=OOV_ID)
     keep_probs = tf.constant(keep_probs)
 
-    num_sents = sum([len(list(open(fn))) for fn in filenames]) * self._epochs
+    num_sents = sum([len(list(open(fn, encoding="utf-8"))) for fn in filenames]) * self._epochs
 
     dataset = tf.data.Dataset.zip((
         tf.data.TextLineDataset(filenames).repeat(self._epochs), 
