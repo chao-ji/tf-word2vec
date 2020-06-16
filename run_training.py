@@ -11,11 +11,12 @@ Learned word embeddings will be saved to /PATH/TO/OUT_DIR/embed.npy, and
 vocabulary saved to /PATH/TO/OUT_DIR/vocab.txt
 """
 import os
-from datetime import datetime
+import time
 
 import tensorflow as tf
 import numpy as np
 
+# import project files
 from dataset import Word2VecDataset
 from word2vec import Word2VecModel
 
@@ -80,13 +81,13 @@ def main(_):
     sess.run(tf.global_variables_initializer())
 
     average_loss = 0.
-
     step = 0
     while True:
       try: 
         result_dict = sess.run(to_be_run_dict)
       except tf.errors.OutOfRangeError:
         break
+    
       average_loss += result_dict['loss'].mean()
       if step % FLAGS.log_per_steps == 0:
         if step > 0:
@@ -94,6 +95,7 @@ def main(_):
         print('step:', step, 'average_loss:', average_loss, 
             'learning_rate:', result_dict['learning_rate'])
         average_loss = 0.
+        
       step += 1
 
     syn0_final = sess.run(word2vec.syn0)
@@ -102,6 +104,7 @@ def main(_):
   with open(os.path.join(FLAGS.out_dir, 'vocab.txt'), 'w', encoding="utf-8") as fid:
     for w in dataset.table_words:
       fid.write(w + '\n')
+      
   print('Word embeddings saved to', os.path.join(FLAGS.out_dir, 'embed.npy'))
   print('Vocabulary saved to', os.path.join(FLAGS.out_dir, 'vocab.txt'))
 
