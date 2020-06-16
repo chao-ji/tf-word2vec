@@ -72,7 +72,6 @@ def main(_):
                            min_alpha=FLAGS.min_alpha,
                            add_bias=FLAGS.add_bias,
                            random_seed=0)
-
   to_be_run_dict = word2vec.train(dataset, FLAGS.filenames)
 
   with tf.Session() as sess:
