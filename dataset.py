@@ -17,10 +17,10 @@ class Word2VecDataset(object):
   def __init__(self,
                arch='skip_gram',
                algm='negative_sampling',
-               epochs=1,
-               batch_size=32,
+               epochs=5,
+               batch_size=100,
                max_vocab_size=0,
-               min_count=10,
+               min_count=2,
                sample=1e-3,
                window_size=5):
     """Constructor.
@@ -229,39 +229,51 @@ class Word2VecDataset(object):
         tf.constant(table_words), default_value=OOV_ID)
     keep_probs = tf.constant(keep_probs)
 
-    num_sents = sum([len(list(open(fn, encoding="utf-8"))) for fn in filenames]) * self._epochs
-
-    dataset = tf.data.Dataset.zip((
-        tf.data.TextLineDataset(filenames).repeat(self._epochs), 
-        tf.data.Dataset.from_tensor_slices(tf.range(num_sents) / num_sents)))
-
-    dataset = dataset.map(lambda sent, progress: 
-        (get_word_indices(sent, table_words), progress))
-    dataset = dataset.map(lambda indices, progress: 
-        (subsample(indices, keep_probs), progress))
-    dataset = dataset.filter(lambda indices, progress: 
+    num_sents = sum([len(list(open(fn, encoding="utf-8")
+                              )) for fn in filenames])
+    num_sents = self._epochs * num_sents
+    
+    # include epoch number, like progress
+    a_zip = tf.data.TextLineDataset(filenames).repeat(self._epochs)
+    b_zip = tf.range(1, 1+num_sents) / num_sents
+    c_zip = tf.repeat(tf.range(1, 1+self._epochs), int(num_sents / self._epochs))
+    
+    dataset = tf.data.Dataset.zip((a_zip,
+                                   tf.data.Dataset.from_tensor_slices(b_zip),
+                                   tf.data.Dataset.from_tensor_slices(c_zip)))
+        
+    dataset = dataset.map(lambda sent, progress, epoch: 
+        (get_word_indices(sent, table_words), progress, epoch))
+    dataset = dataset.map(lambda indices, progress, epoch: 
+        (subsample(indices, keep_probs), progress, epoch))
+    dataset = dataset.filter(lambda indices, progress, epoch: 
         tf.greater(tf.size(indices), 1))
 
-    dataset = dataset.map(lambda indices, progress: (generate_instances(
-        indices, self._arch, self._window_size, codes_points), progress))
-    dataset = dataset.map(lambda instances, progress: (
-        instances, tf.fill(tf.shape(instances)[:1], progress)))
+    dataset = dataset.map(lambda indices, progress, epoch: (
+      generate_instances(
+        indices, self._arch, self._window_size, codes_points), progress, epoch))
+    
+    dataset = dataset.map(lambda instances, progress, epoch: (
+        instances, tf.fill(tf.shape(instances)[:1], progress),
+                   tf.fill(tf.shape(instances)[:1], epoch)))
 
-    dataset = dataset.flat_map(lambda instances, progress: 
-        tf.data.Dataset.from_tensor_slices((instances, progress)))
+    dataset = dataset.flat_map(lambda instances, progress, epoch: 
+        tf.data.Dataset.from_tensor_slices((instances, progress, epoch)))
     dataset = dataset.batch(self._batch_size, drop_remainder=True)
-
-    iterator = dataset.make_initializable_iterator()
+    
+    iterator = tf.compat.v1.data.make_initializable_iterator(dataset)
     self._iterator_initializer = iterator.initializer
-    tensor, progress = iterator.get_next()
+    tensor, progress, epoch = iterator.get_next()
     progress.set_shape([self._batch_size])
+    epoch.set_shape([self._batch_size])
 
     inputs, labels = self._prepare_inputs_labels(tensor)
     if self._arch == 'skip_gram':
       inputs = tf.squeeze(inputs, axis=1)
     if self._algm == 'negative_sampling':
       labels = tf.squeeze(labels, axis=1)
-    return {'inputs': inputs, 'labels': labels, 'progress': progress}
+      
+    return {'inputs': inputs, 'labels': labels, 'progress': progress, 'epoch': epoch}
 
 
 def get_word_indices(sent, table_words):
@@ -294,7 +306,7 @@ def subsample(indices, keep_probs):
   """
   indices = tf.boolean_mask(indices, tf.not_equal(indices, OOV_ID))
   keep_probs = tf.gather(keep_probs, indices)
-  randvars = tf.random_uniform(tf.shape(keep_probs), 0, 1)
+  randvars = tf.random.uniform(tf.shape(keep_probs), 0, 1)
   indices = tf.boolean_mask(indices, tf.less(randvars, keep_probs))
   return indices
 
@@ -340,7 +352,7 @@ def generate_instances(indices, arch, window_size, codes_points=None):
         shape: [N, 2*window_size+2*max_depth+2]
   """
   def per_target_fn(index, init_array):
-    reduced_size = tf.random_uniform([], maxval=window_size, dtype=tf.int32)
+    reduced_size = tf.random.uniform([], maxval=window_size, dtype=tf.int32)
     left = tf.range(tf.maximum(index - window_size + reduced_size, 0), index)
     right = tf.range(index + 1, 
         tf.minimum(index + 1 + window_size - reduced_size, tf.size(indices)))
@@ -369,6 +381,6 @@ def generate_instances(indices, arch, window_size, codes_points=None):
                                   per_target_fn, 
                                   [0, init_array],
                                       back_prop=False)
-  instances = tf.to_int64(result_array.concat())
+  instances = tf.cast(result_array.concat(), tf.int64)
   return instances
 
