@@ -86,14 +86,14 @@ class Word2VecModel(object):
     """
     tensor_dict = dataset.get_tensor_dict(filenames)
     inputs, labels = tensor_dict['inputs'], tensor_dict['labels']
-
-    loss = self._build_loss(inputs, labels, dataset.unigram_counts)
     global_step = tf.train.get_or_create_global_step()
-
     learning_rate = tf.maximum(self._alpha * (1 - tensor_dict['progress'][0]) +
          self._min_alpha * tensor_dict['progress'][0], self._min_alpha)
+
+    loss = self._build_loss(inputs, labels, dataset.unigram_counts)    
     optimizer = tf.train.GradientDescentOptimizer(learning_rate)
     grad_update_op = optimizer.minimize(loss, global_step=global_step)
+    
     to_be_run_dict = {'grad_update_op': grad_update_op, 
                       'loss': loss, 
                       'learning_rate': learning_rate}
